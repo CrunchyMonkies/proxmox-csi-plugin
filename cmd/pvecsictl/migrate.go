@@ -18,21 +18,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
-	"time"
 
 	cobra "github.com/spf13/cobra"
 
 	csiconfig "github.com/sergelogvinov/proxmox-csi-plugin/pkg/config"
-	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi"
+	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/migrator"
 	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
 	tools "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/kubernetes"
-	toolsproxmox "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/proxmox"
-	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
 
 	rbacv1 "k8s.io/api/authorization/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientkubernetes "k8s.io/client-go/kubernetes"
 )
 
@@ -68,140 +64,39 @@ func setMigrateCmdFlags(cmd *cobra.Command) {
 
 	flags.BoolP("force", "f", false, "force migration even if the persistentvolumeclaims is in use")
 	flags.Int("timeout", 10800, "task timeout in seconds")
+	flags.String("storage", "", "move the disk into this storage on the target node (default: keep the current storage name)")
+	flags.Int("helper-vmid", migrator.DefaultHelperVMID, "VM ID of the transient helper VM used to convert qcow2/vmdk volumes")
 }
 
-// nolint: cyclop, gocyclo
 func (c *migrateCmd) runMigration(cmd *cobra.Command, args []string) error {
 	flags := cmd.Flags()
-	force, _ := flags.GetBool("force") //nolint: errcheck
+	force, _ := flags.GetBool("force")             //nolint: errcheck
+	taskTimeout, _ := flags.GetInt("timeout")      //nolint: errcheck
+	targetStorage, _ := flags.GetString("storage") //nolint: errcheck
+	helperVMID, _ := flags.GetInt("helper-vmid")   //nolint: errcheck
 
-	var err error
-
-	ctx := context.Background()
-	pvc := args[0]
-	node := args[1]
-
-	kubePVC, kubePV, err := tools.PVCResources(ctx, c.kclient, c.namespace, pvc)
-	if err != nil {
-		return fmt.Errorf("failed to get resources: %v", err)
+	m := &migrator.Migrator{
+		KClient:    c.kclient,
+		PClient:    c.pclient,
+		Logger:     logger,
+		HelperVMID: helperVMID,
 	}
 
-	vol, err := volume.NewVolumeFromVolumeID(kubePV.Spec.CSI.VolumeHandle)
-	if err != nil {
-		return fmt.Errorf("failed to parse volume ID: %v", err)
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     c.namespace,
+		PVCName:       args[0],
+		TargetNode:    args[1],
+		TargetStorage: targetStorage,
+		Force:         force,
+		TaskTimeout:   taskTimeout,
+	})
+	if errors.Is(err, migrator.ErrSharedStorage) {
+		logger.Infof("%v, nothing to do", err)
+
+		return nil
 	}
 
-	if vol.Node() == node {
-		return fmt.Errorf("persistentvolumeclaims %s is already on proxmox node %s", pvc, node)
-	}
-
-	cluster, err := c.pclient.GetProxmoxCluster(vol.Cluster())
-	if err != nil {
-		return fmt.Errorf("failed to get Proxmox cluster: %v", err)
-	}
-
-	pods, vmName, err := tools.PVCPodUsage(ctx, c.kclient, c.namespace, pvc)
-	if err != nil {
-		return fmt.Errorf("failed to find pods using pvc: %v", err)
-	}
-
-	// Resolve the Proxmox VM ID before the force-drain path so we capture
-	// the node while it is still reachable. Uses providerID first, then
-	// falls back to the proxmox.sinextra.dev/instance-id annotation.
-	var vmID int
-
-	if vmName != "" {
-		kubeNode, nodeErr := c.kclient.CoreV1().Nodes().Get(ctx, vmName, metav1.GetOptions{})
-		if nodeErr != nil {
-			return fmt.Errorf("failed to get kubernetes node %s: %v", vmName, nodeErr)
-		}
-
-		vmID, nodeErr = csi.ProxmoxVMIDbyNode(kubeNode)
-		if nodeErr != nil {
-			return fmt.Errorf("failed to resolve Proxmox VMID from node %s: %v", vmName, nodeErr)
-		}
-
-		logger.Infof("resolved kubernetes node %s to Proxmox VMID %d", vmName, vmID)
-	}
-
-	cordonedNodes := []string{}
-
-	if len(pods) > 0 {
-		if force {
-			logger.Infof("persistentvolumeclaims is using by pods: %s on node %s, trying to force migration\n", strings.Join(pods, ","), vmName)
-
-			var csiNodes []string
-
-			csiNodes, err = tools.CSINodes(ctx, c.kclient, csi.DriverName)
-			if err != nil {
-				return err
-			}
-
-			cordonedNodes = append(cordonedNodes, csiNodes...)
-
-			logger.Infof("cordoning nodes: %s", strings.Join(cordonedNodes, ","))
-
-			if _, err = tools.CondonNodes(ctx, c.kclient, cordonedNodes); err != nil {
-				return fmt.Errorf("failed to cordon nodes: %v", err)
-			}
-
-			logger.Infof("terminated pods: %s", strings.Join(pods, ","))
-
-			for _, pod := range pods {
-				if err = c.kclient.CoreV1().Pods(c.namespace).Delete(ctx, pod, metav1.DeleteOptions{}); err != nil {
-					return fmt.Errorf("failed to delete pod: %v", err)
-				}
-			}
-
-			for {
-				p, _, e := tools.PVCPodUsage(ctx, c.kclient, c.namespace, pvc)
-				if e != nil {
-					return fmt.Errorf("failed to find pods using pvc: %v", e)
-				}
-
-				if len(p) == 0 {
-					break
-				}
-
-				logger.Infof("waiting pods: %s", strings.Join(p, " "))
-
-				time.Sleep(2 * time.Second)
-			}
-
-			time.Sleep(5 * time.Second)
-		} else {
-			return fmt.Errorf("persistentvolumeclaims is using by pods: %s on node %s, cannot move volume", strings.Join(pods, ","), vmName)
-		}
-	}
-
-	if err = toolsproxmox.WaitForVolumeDetach(ctx, cluster, vmID, vol.Disk()); err != nil {
-		return fmt.Errorf("failed to wait for volume detach: %v", err)
-	}
-
-	logger.Infof("moving disk %s to proxmox node %s", vol.Disk(), node)
-
-	taskTimeout, _ := flags.GetInt("timeout") //nolint: errcheck
-	if err = toolsproxmox.MoveQemuDisk(ctx, cluster, vol, node, taskTimeout); err != nil {
-		return fmt.Errorf("failed to move disk: %v", err)
-	}
-
-	logger.Infof("replacing persistentvolume topology")
-
-	if err = replacePVTopology(ctx, c.kclient, c.namespace, kubePVC, kubePV, vol, node); err != nil {
-		return fmt.Errorf("failed to replace PV topology: %v", err)
-	}
-
-	if force {
-		logger.Infof("uncordoning nodes: %s", strings.Join(cordonedNodes, ","))
-
-		if err = tools.UncondonNodes(ctx, c.kclient, cordonedNodes); err != nil {
-			return fmt.Errorf("failed to uncordon nodes: %v", err)
-		}
-	}
-
-	logger.Infof("persistentvolumeclaims %s has been migrated to proxmox node %s", pvc, node)
-
-	return nil
+	return err
 }
 
 // nolint: dupl

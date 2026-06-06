@@ -58,6 +58,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: node
 {{- end }}
 
+{{- define "proxmox-csi-plugin-migrator.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "proxmox-csi-plugin.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: migrator
+{{- end }}
+
 
 {{/*
 Create the name of the service account to use

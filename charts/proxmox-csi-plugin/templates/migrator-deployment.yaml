@@ -1,0 +1,107 @@
+{{- if .Values.migrator.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-migrator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+spec:
+  # Multiple replicas are safe: leader election ensures only one acts.
+  replicas: {{ .Values.migrator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "proxmox-csi-plugin-migrator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ toJson .Values.migrator.config | sha256sum }}
+      {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "proxmox-csi-plugin-migrator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      serviceAccountName: {{ include "proxmox-csi-plugin.serviceAccountName" . }}-migrator
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ include "proxmox-csi-plugin.fullname" . }}-migrator
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.migrator.image.repository }}:{{ .Values.migrator.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.migrator.image.pullPolicy }}
+          command: ["/bin/pvecsictl"]
+          args:
+            - "controller"
+            - "--config={{ .Values.configFile }}"
+            - "--max-attempts={{ .Values.migrator.maxAttempts }}"
+            - "--helper-vmid={{ .Values.migrator.helperVMID }}"
+            - "--timeout={{ .Values.migrator.taskTimeout }}"
+            - "--drain-timeout={{ .Values.migrator.drainTimeout }}"
+            - "--detach-timeout={{ .Values.migrator.detachTimeout }}"
+            {{- if not .Values.migrator.leaderElection }}
+            - "--leader-election=false"
+            {{- end }}
+            {{- if .Values.migrator.podFollow }}
+            - "--pod-follow"
+            {{- end }}
+            {{- if .Values.migrator.metrics.enabled }}
+            - "--metrics-address=:{{ .Values.migrator.metrics.port }}"
+            {{- end }}
+            {{- range .Values.migrator.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            {{- if .Values.migrator.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.migrator.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          resources:
+            {{- toYaml .Values.migrator.resources | nindent 12 }}
+          volumeMounts:
+            - name: cloud-config
+              mountPath: /etc/proxmox/
+      volumes:
+        {{- if .Values.migrator.existingConfigSecret }}
+        - name: cloud-config
+          secret:
+            secretName: {{ .Values.migrator.existingConfigSecret }}
+            items:
+              - key: {{ .Values.migrator.existingConfigSecretKey }}
+                path: config.yaml
+        {{- else }}
+        - name: cloud-config
+          secret:
+            secretName: {{ include "proxmox-csi-plugin.fullname" . }}-migrator
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

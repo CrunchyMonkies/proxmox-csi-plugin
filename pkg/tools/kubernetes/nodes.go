@@ -28,7 +28,7 @@ import (
 )
 
 // CSINodes returns a list of nodes that have the specified CSI driver name.
-func CSINodes(ctx context.Context, kclient *clientkubernetes.Clientset, csiDriverName string) ([]string, error) {
+func CSINodes(ctx context.Context, kclient clientkubernetes.Interface, csiDriverName string) ([]string, error) {
 	nodes := []string{}
 
 	csinodes, err := kclient.StorageV1().CSINodes().List(ctx, metav1.ListOptions{})
@@ -55,7 +55,7 @@ func CSINodes(ctx context.Context, kclient *clientkubernetes.Clientset, csiDrive
 }
 
 // CondonNodes condones the specified nodes.
-func CondonNodes(ctx context.Context, kclient *clientkubernetes.Clientset, nodes []string) ([]string, error) {
+func CondonNodes(ctx context.Context, kclient clientkubernetes.Interface, nodes []string) ([]string, error) {
 	cordonedNodes := []string{}
 	patch := []byte(`{"spec":{"unschedulable":true}}`)
 
@@ -79,7 +79,7 @@ func CondonNodes(ctx context.Context, kclient *clientkubernetes.Clientset, nodes
 }
 
 // UncondonNodes uncondones the specified nodes.
-func UncondonNodes(ctx context.Context, kclient *clientkubernetes.Clientset, nodes []string) error {
+func UncondonNodes(ctx context.Context, kclient clientkubernetes.Interface, nodes []string) error {
 	patch := []byte(`{"spec":{"unschedulable":false}}`)
 
 	for _, node := range nodes {

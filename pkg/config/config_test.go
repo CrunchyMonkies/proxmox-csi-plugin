@@ -156,6 +156,39 @@ clusters:
 			},
 		},
 		{
+			msg: "valid config with primary storage map",
+			config: strings.NewReader(`
+clusters:
+  - url: https://example.com
+    insecure: false
+    username: "user@pam"
+    password: "secret"
+    region: cluster-1
+    primary_storage:
+      pve-1: local-lvm
+      pve-3: local-zfs
+`),
+			expected: &providerconfig.ClustersConfig{
+				Features: providerconfig.ClustersFeatures{
+					Provider:       providerconfig.ProviderDefault,
+					ControllerVMID: providerconfig.DefaultControllerVMID,
+				},
+				Clusters: []*pxpool.ProxmoxCluster{
+					{
+						URL:      "https://example.com",
+						Insecure: false,
+						Username: "user@pam",
+						Password: "secret",
+						Region:   "cluster-1",
+						PrimaryStorage: map[string]string{
+							"pve-1": "local-lvm",
+							"pve-3": "local-zfs",
+						},
+					},
+				},
+			},
+		},
+		{
 			msg: "provider capmox",
 			config: strings.NewReader(`
 features:
