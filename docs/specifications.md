@@ -467,6 +467,7 @@ The `Dockerfile` is multi-stage: builder (golang:1.26.3-alpine) → `proxmox-csi
 | `docs/architecture.md` | Pod/volume migration architecture diagrams |
 | `docs/volumesnapshot.md` | Snapshot usage (experimental) |
 | `docs/pvecsictl.md` | CLI tool usage and RBAC |
+| `docs/migration-controller.md` | Migration controller operator guide: usage, limitations, design rationale, Proxmox version caveats |
 | `docs/metrics.md` | Prometheus metrics reference |
 | `docs/faq.md` | Common questions |
 | `docs/benchmark.md` | Performance benchmarks |
