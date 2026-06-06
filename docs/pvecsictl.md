@@ -39,7 +39,13 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch"]
+  # Migration progress events (controller/evacuate/rebalance)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
 ```
+
+The `controller` subcommand additionally needs `leases` (get/watch/list/create/update/delete) in its own namespace for leader election.
 
 ## Usage
 
@@ -48,7 +54,10 @@ Usage:
   pvecsictl [command]
 
 Available Commands:
+  controller  Run the annotation-driven volume migration controller
+  evacuate    Evacuate all CSI volumes from a Proxmox node
   migrate     Migrate data from one Proxmox node to another
+  rebalance   Rebalance idle CSI volumes from overloaded Proxmox nodes to emptier ones
   rename      Rename PersistentVolumeClaim
   swap        Swap PersistentVolumes between two PersistentVolumeClaims
 ```
@@ -96,6 +105,12 @@ To move the PVC from zone `hvm-1` to `hvm-2` we can run
 ```shell
 pvecsictl migrate --config=hack/cloud-config.yaml -n default storage-test-0 hvm-2
 ````
+
+If the target node does not have a storage with the same name, move the disk into a different storage with `--storage`:
+
+```shell
+pvecsictl migrate --config=hack/cloud-config.yaml -n default storage-test-0 hvm-2 --storage local-zfs
+```
 
 If you're met with
 
@@ -270,6 +285,50 @@ pod/test-1   1/1     Running   0          19s
 NAME                                   STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   VOLUMEATTRIBUTESCLASS   AGE
 persistentvolumeclaim/storage-test-0   Bound    pvc-41b7078d-aa9f-4757-9056-8bd1e8e0697f   15Gi       RWO            proxmox-lvm    <unset>                 13s
 persistentvolumeclaim/storage-test-1   Bound    pvc-e248bc56-dcf4-4145-93b9-a374a7c3b900   10Gi       RWO            proxmox-lvm    <unset>                 13s
+```
+
+### Evacuate
+
+Evacuate all CSI volumes from a Proxmox node (zone), e.g. before node maintenance.
+
+By default, evacuate stamps `csi.proxmox.sinextra.dev/migrate-node` annotations on the affected PVCs and lets the [migration controller](migration-controller.md) execute them one at a time. With `--now` it runs the migrations synchronously (requires root credentials in the config, like `migrate`).
+
+```shell
+# Plan only: show which volume goes where (targets picked by free capacity)
+pvecsictl evacuate --config=hack/cloud-config.yaml hvm-1 --dry-run
+
+# Request evacuation; the migration controller does the work
+pvecsictl evacuate --config=hack/cloud-config.yaml hvm-1
+
+# Force-migrate in-use volumes to an explicit target, synchronously
+pvecsictl evacuate --config=hack/cloud-config.yaml hvm-1 --target hvm-2 --force --now
+```
+
+Alternatively, annotate the Kubernetes node directly (no CLI needed):
+
+```shell
+kubectl annotate node kube-store-11 csi.proxmox.sinextra.dev/evacuate=auto
+```
+
+### Rebalance
+
+Move idle volumes (not used by any pod) from Proxmox nodes above `--high-threshold` storage usage to the emptiest node below `--low-threshold`. Designed to run unattended from a CronJob (see the Helm chart's `migrator.rebalance` values); requires the migration controller to execute the planned moves.
+
+```shell
+pvecsictl rebalance --config=hack/cloud-config.yaml --dry-run
+
+pvecsictl rebalance --config=hack/cloud-config.yaml \
+    --high-threshold=0.8 --low-threshold=0.6 --max-migrations=2 --window "22:00-04:00"
+```
+
+Rebalance never disrupts running pods: in-use volumes are skipped.
+
+### Controller
+
+Run the annotation-driven migration controller in-cluster. See [migration-controller.md](migration-controller.md) for the annotation protocol, Helm deployment, and the failure-recovery runbook.
+
+```shell
+pvecsictl controller --config=/etc/proxmox/config.yaml --leader-election
 ```
 
 # Feedback

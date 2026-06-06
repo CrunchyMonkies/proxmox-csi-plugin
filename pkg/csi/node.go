@@ -272,7 +272,7 @@ func (n *NodeService) NodeUnstageVolume(_ context.Context, request *csi.NodeUnst
 	} else {
 		deviceName := filepath.Base(devicePath)
 
-		if err = os.WriteFile(fmt.Sprintf("/sys/block/%s/device/state", deviceName), []byte("offline"), 0644); err != nil { //nolint:gofumpt
+		if err = os.WriteFile(fmt.Sprintf("/sys/block/%s/device/state", deviceName), []byte("offline"), 0o644); err != nil { //nolint:gofumpt
 			klog.InfoS("NodeUnstageVolume: failed to offline device, ignored", "device", devicePath)
 		}
 	}

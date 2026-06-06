@@ -1,0 +1,31 @@
+{{- if .Values.migrator.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-migrator
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+rules:
+  # Find and force-drain pods that use a migrating PVC
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list"]
+  # Recreate PV/PVC with the new topology
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # Node cordoning/uncordoning and evacuation annotations
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "patch"]
+  # Migration progress events on PVCs and Nodes
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+{{- end }}

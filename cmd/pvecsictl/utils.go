@@ -20,9 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi"
 	tools "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/kubernetes"
-	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
 
 	rbacv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -51,80 +49,6 @@ func cordoneNodeWithPVs(
 	}
 
 	return csiNodes, nil
-}
-
-func replacePVTopology(
-	ctx context.Context,
-	clientset *clientkubernetes.Clientset,
-	namespace string,
-	pvc *corev1.PersistentVolumeClaim,
-	pv *corev1.PersistentVolume,
-	vol *volume.Volume,
-	node string,
-) error {
-	newPVC := pvc.DeepCopy()
-	newPVC.ObjectMeta.UID = ""
-	newPVC.ObjectMeta.ResourceVersion = ""
-	delete(newPVC.ObjectMeta.Annotations, csi.DriverName+"/migrate")
-	delete(newPVC.ObjectMeta.Annotations, csi.DriverName+"/migrate-node")
-	newPVC.Status = corev1.PersistentVolumeClaimStatus{}
-	newPVC.Spec.Resources.Requests = corev1.ResourceList{
-		corev1.ResourceStorage: pvc.Status.Capacity[corev1.ResourceStorage],
-	}
-
-	newPV := pv.DeepCopy()
-	newPV.ObjectMeta.UID = ""
-	newPV.ObjectMeta.ResourceVersion = ""
-	delete(newPV.ObjectMeta.Annotations, csi.DriverName+"/migrate")
-	delete(newPV.ObjectMeta.Annotations, csi.DriverName+"/migrate-node")
-	newPV.Spec.ClaimRef = nil
-	newPV.Status = corev1.PersistentVolumeStatus{}
-	newPV.Spec.CSI.VolumeHandle = volume.NewVolume(vol.Region(), node, vol.Storage(), vol.Disk()).VolumeID()
-	newPV.Spec.NodeAffinity.Required = &corev1.NodeSelector{
-		NodeSelectorTerms: []corev1.NodeSelectorTerm{
-			{
-				MatchExpressions: []corev1.NodeSelectorRequirement{
-					{
-						Key:      corev1.LabelTopologyRegion,
-						Operator: "In",
-						Values:   []string{vol.Region()},
-					},
-					{
-						Key:      corev1.LabelTopologyZone,
-						Operator: "In",
-						Values:   []string{node},
-					},
-				},
-			},
-		},
-	}
-
-	policy := metav1.DeletePropagationForeground
-	if err := clientset.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvc.Name, metav1.DeleteOptions{PropagationPolicy: &policy}); err != nil {
-		return fmt.Errorf("failed to delete PVC: %v", err)
-	}
-
-	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
-		if err := clientset.CoreV1().PersistentVolumes().Delete(ctx, pv.Name, metav1.DeleteOptions{PropagationPolicy: &policy}); err != nil {
-			return fmt.Errorf("failed to delete PV: %v", err)
-		}
-	}
-
-	if err := tools.PVWaitDelete(ctx, clientset, pv.Name); err != nil {
-		return fmt.Errorf("failed to wait for PV deletion: %v", err)
-	}
-
-	if _, err := clientset.CoreV1().PersistentVolumes().Create(ctx, newPV, metav1.CreateOptions{}); err != nil {
-		return fmt.Errorf("failed to create PV: %v", err)
-	}
-
-	if _, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, newPVC, metav1.CreateOptions{}); err != nil {
-		if _, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Update(ctx, newPVC, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("failed to create/update PVC: %v", err)
-		}
-	}
-
-	return nil
 }
 
 func renamePVC(

@@ -45,6 +45,11 @@ type ProxmoxCluster struct {
 	Username        string `yaml:"username,omitempty"`
 	Password        string `yaml:"password,omitempty"`
 	Region          string `yaml:"region,omitempty"`
+
+	// PrimaryStorage maps a Proxmox node name to its preferred storage ID.
+	// Used by volume migration when the source storage name does not exist
+	// on the target node.
+	PrimaryStorage map[string]string `yaml:"primary_storage,omitempty"`
 }
 
 // ProxmoxPool is a Proxmox client pool of proxmox clusters.
