@@ -6,5 +6,6 @@ spec:
   attachRequired: true
   podInfoOnMount: true
   storageCapacity: true
+  fsGroupPolicy: {{ .Values.csidriver.fsGroupPolicy | default "None" }}
   volumeLifecycleModes:
   - Persistent

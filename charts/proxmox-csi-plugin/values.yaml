@@ -30,6 +30,16 @@ serviceAccount:
 # Currently, cannot be customized.
 provisionerName: csi.proxmox.sinextra.dev
 
+# CSIDriver object settings.
+csidriver:
+  # -- fsGroupPolicy controls whether kubelet recursively applies the pod's fsGroup to
+  # the volume. `None` disables it (volumes keep their own permissions); use the
+  # `rootDirPermissions` StorageClass parameter to make fresh volumes writable by
+  # non-root pods. `ReadWriteOnceWithFSType` (the previous default) breaks workloads
+  # such as Postgres that reject group-writable data directories. Note: this field is
+  # immutable on an existing CSIDriver; changing it requires recreating the object.
+  fsGroupPolicy: None
+
 # -- Cluster name.
 # Currently, cannot be customized.
 clusterID: kubernetes

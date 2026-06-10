@@ -45,6 +45,13 @@ const (
 
 	// StorageInodeSizeKey the inode size when formatting a volume
 	StorageInodeSizeKey = "inodeSize"
+
+	// RootDirPermissionsKey is the octal mode applied (non-recursively) to the volume
+	// root directory after format/mount. It lets a non-root pod initialize a freshly
+	// formatted volume when the CSIDriver runs with fsGroupPolicy: None (i.e. kubelet
+	// does not recursively chown/chmod the volume). Only the root directory is touched,
+	// so application-managed data subdirectories (e.g. Postgres PGDATA) keep their perms.
+	RootDirPermissionsKey = "rootDirPermissions"
 )
 
 // StorageParameters contains storage parameters
@@ -70,6 +77,8 @@ type StorageParameters struct {
 	SpeedMbps      *int   `json:"diskMBps"`
 	BlockSize      *int   `json:"blockSize"`
 	InodeSize      *int   `json:"inodeSize"`
+
+	RootDirPermissions string `json:"rootDirPermissions,omitempty"`
 
 	Replicate         bool   `json:"replicate,omitempty"   cfg:"replicate"`
 	ReplicateSchedule string `json:"replicateSchedule,omitempty"`
