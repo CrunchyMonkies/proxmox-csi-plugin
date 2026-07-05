@@ -57,7 +57,7 @@ migrator:
 
 ```shell
 helm upgrade -i --namespace=csi-proxmox -f values.yaml \
-    proxmox-csi-plugin oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin
+    proxmox-csi-plugin oci://ghcr.io/crunchymonkies/charts/proxmox-csi-plugin
 ```
 
 This deploys:

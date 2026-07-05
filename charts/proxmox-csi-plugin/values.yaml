@@ -125,7 +125,7 @@ controller:
   plugin:
     # -- Controller CSI Driver.
     image:
-      repository: ghcr.io/sergelogvinov/proxmox-csi-controller
+      repository: ghcr.io/crunchymonkies/proxmox-csi-controller
       pullPolicy: IfNotPresent
       # Overrides the image tag whose default is the chart appVersion.
       tag: ""
@@ -207,7 +207,7 @@ node:
   plugin:
     # -- Node CSI Driver.
     image:
-      repository: ghcr.io/sergelogvinov/proxmox-csi-node
+      repository: ghcr.io/crunchymonkies/proxmox-csi-node
       pullPolicy: IfNotPresent
       # Overrides the image tag whose default is the chart appVersion.
       tag: ""
@@ -391,7 +391,7 @@ migrator:
 
   image:
     # -- Migrator (pvecsictl) image.
-    repository: ghcr.io/sergelogvinov/pvecsictl
+    repository: ghcr.io/crunchymonkies/pvecsictl
     # -- Overrides the image tag whose default is the chart appVersion.
     tag: ""
     # -- Always or IfNotPresent.

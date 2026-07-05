@@ -49,6 +49,16 @@ Arrows with dotted lines indicate the capability of attaching a Persistent Volum
   You can manually move PVs across zones using [pvecsictl](docs/pvecsictl.md) tool.
 - Pods with Persistent Volume (PV) allocated on `shared disk (like: ceph, nfs)` **can** automatically migrate across zones (inside one region).
 
+## Fork additions
+
+This is a fork of [sergelogvinov/proxmox-csi-plugin](https://github.com/sergelogvinov/proxmox-csi-plugin) with the following extra features. Images and the Helm chart are published to **GitHub Packages** under [`ghcr.io/crunchymonkies`](https://github.com/orgs/CrunchyMonkies/packages).
+
+- **Volume Migration Controller** — an annotation-driven controller that migrates a PV to another Proxmox node online, one volume at a time. Request a move by annotating the PVC with `csi.proxmox.sinextra.dev/migrate-node` (target zone), optionally `…/migrate-force` (cordon + reschedule mounting pods) and `…/migrate-storage` (target storage); progress is reported back via `…/migrate-phase` and `…/migrate-message`. Annotate a Kubernetes Node with `…/evacuate=<node|auto>` to move every CSI volume off it. qcow2/vmdk volumes are converted to raw first using a transient **helper VM** (`helperVMID`, default `9998`). An optional scheduled **rebalance** CronJob spreads idle volumes off overloaded nodes, and opt-in pod-follow keeps a volume in the zone its pods land in. See [Volume Migration Controller — Operator Guide](docs/migration-controller.md).
+- **`pvecsictl` subcommands** — `controller` (run the migration controller), `evacuate` (drain a Proxmox node), and `rebalance`, plus `migrate --helper-vmid/--storage`. See [pvecsictl](docs/pvecsictl.md).
+- **`rootDirPermissions` StorageClass parameter** — an octal mode applied (non-recursively) to the volume root at stage time so non-root pods (e.g. Postgres) can write, without touching app-managed subdirectories. See [StorageClass options](docs/options.md).
+- **`fsGroupPolicy: None` default** — replaces upstream's `ReadWriteOnceWithFSType` to avoid kubelet's recursive `fsGroup` chmod, which produces group-writable data directories that workloads like Postgres reject. **Upgrade note:** `fsGroupPolicy` is immutable on an existing `CSIDriver` object — switching it on an already-installed cluster requires deleting and recreating the `CSIDriver`.
+- **Configurable controller VMID** (`controllerVmID`, default `9999`) and a StorageClass **`volumeBindingMode`** option.
+
 ## Installation
 
 To make use of the Proxmox CSI Plugin you need to correctly configure your Proxmox installation as well as your Kubernetes instance.
@@ -123,6 +133,7 @@ Storage parameters:
 * `storage` - proxmox storage ID
 * `cache` - qemu cache param: `directsync`, `none`, `writeback`, `writethrough` [Official documentation](https://pve.proxmox.com/wiki/Performance_Tweaks)
 * `ssd` - true if SSD/NVME disk, which enables both SSD emulation and Discard options in Proxmox
+* `rootDirPermissions` - (fork) octal mode applied to the volume root at stage time (e.g. `"0775"`), so non-root pods can write to a freshly formatted volume
 
 For more detailed options and a comprehensive understanding, refer to the following link [StorageClass options](docs/options.md)
 
@@ -133,7 +144,7 @@ For more detailed options and a comprehensive understanding, refer to the follow
 Deploy a test Pod
 
 ```shell
-kubectl apply -f https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/main/docs/deploy/test-pod-ephemeral.yaml
+kubectl apply -f https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/test-pod-ephemeral.yaml
 ```
 
 Check status of PV and PVC
@@ -179,7 +190,7 @@ Source:
 ### StatefulSet with persistent storage
 
 ```shell
-kubectl apply -f https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/main/docs/deploy/test-statefulset.yaml
+kubectl apply -f https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/test-statefulset.yaml
 ```
 
 Check status of PV and PVC
@@ -286,14 +297,14 @@ See [FAQ](docs/faq.md) for answers to common questions.
 Contributions are welcomed and appreciated!
 See [Contributing](CONTRIBUTING.md) for our guidelines.
 
-If this project is useful to you, please consider starring the [repository](https://github.com/sergelogvinov/proxmox-csi-plugin).
+If this project is useful to you, please consider starring the [repository](https://github.com/CrunchyMonkies/proxmox-csi-plugin).
 
 ## Privacy Policy
 
 This project does not collect or send any metrics or telemetry data.
 You can build the images yourself and store them in your private registry, see the [Makefile](Makefile) for details.
 
-To provide feedback or report an issue, please use the [GitHub Issues](https://github.com/sergelogvinov/proxmox-csi-plugin/issues).
+To provide feedback or report an issue, please use the [GitHub Issues](https://github.com/CrunchyMonkies/proxmox-csi-plugin/issues).
 
 ## License
 

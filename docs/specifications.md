@@ -13,8 +13,8 @@ The Proxmox CSI Plugin is a [Container Storage Interface](https://github.com/con
 | Driver name | `csi.proxmox.sinextra.dev` | `pkg/csi/driver.go` (`DriverName`) |
 | Driver version constant | `0.7.0` | `pkg/csi/driver.go` (`DriverVersion`) |
 | CSI spec version | `1.12.0` | `pkg/csi/driver.go` (`DriverSpecVersion`) |
-| Application version | `v0.18.1` | `charts/proxmox-csi-plugin/Chart.yaml` (`appVersion`) |
-| Helm chart version | `0.5.7` | `charts/proxmox-csi-plugin/Chart.yaml` |
+| Application version | `v0.18.1-prod.1` | `charts/proxmox-csi-plugin/Chart.yaml` (`appVersion`) |
+| Helm chart version | `0.5.9` | `charts/proxmox-csi-plugin/Chart.yaml` |
 | Go module | `github.com/sergelogvinov/proxmox-csi-plugin` | `go.mod` |
 | Go version | 1.26.3 | `go.mod` |
 | License | Apache 2.0 | `LICENSE` |
@@ -396,12 +396,12 @@ From `charts/proxmox-csi-plugin/values.yaml` and the `Dockerfile`:
 
 | Method | Location |
 |---|---|
-| Helm chart | `charts/proxmox-csi-plugin/` (OCI: `ghcr.io/sergelogvinov/charts/proxmox-csi-plugin` upstream) |
+| Helm chart | `charts/proxmox-csi-plugin/` (OCI: `ghcr.io/crunchymonkies/charts/proxmox-csi-plugin` (fork)) |
 | Raw manifests | `docs/deploy/proxmox-csi-plugin.yml` (edge), `-release.yml`, `-talos.yml` |
 | Talos-specific values | `charts/proxmox-csi-plugin/values.talos.yaml` |
 | Examples | `docs/deploy/test-*.yaml`, `docs/deploy/pvc.yaml` |
 
-Container images (upstream registry `ghcr.io/sergelogvinov`): `proxmox-csi-controller`, `proxmox-csi-node`, `pvecsictl`. Architectures: `linux/amd64`, `linux/arm64`.
+Container images (fork registry `ghcr.io/crunchymonkies`): `proxmox-csi-controller`, `proxmox-csi-node`, `pvecsictl`. Architectures: `linux/amd64`, `linux/arm64`.
 
 Supported distributions (kubelet dir overrides in `values.yaml`): vanilla Kubernetes (`/var/lib/kubelet`), Talos, k0s (`/var/lib/k0s/kubelet`), microk8s (`/var/snap/microk8s/common/var/lib/kubelet`).
 
