@@ -146,13 +146,13 @@ kubectl -n csi-proxmox create secret generic proxmox-csi-plugin --from-file=conf
 Install latest release version
 
 ```shell
-kubectl apply -f https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin-release.yml
+kubectl apply -f https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin-release.yml
 ```
 
 Or install latest stable version (edge)
 
 ```shell
-kubectl apply -f https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
+kubectl apply -f https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
 ```
 
 ### Install the plugin by using Helm
@@ -189,7 +189,7 @@ storageClass:
 Install the plugin. You need to prepare the `csi-proxmox` namespace first, see above
 
 ```shell
-helm upgrade -i -n csi-proxmox -f proxmox-csi.yaml proxmox-csi-plugin oci://ghcr.io/sergelogvinov/charts/proxmox-csi-plugin
+helm upgrade -i -n csi-proxmox -f proxmox-csi.yaml proxmox-csi-plugin oci://ghcr.io/crunchymonkies/charts/proxmox-csi-plugin
 ```
 
 #### Option for k0s
@@ -208,6 +208,39 @@ If you're running [microk8s](https://microk8s.io/) you need to add extra value t
 kubeletDir: /var/snap/microk8s/common/var/lib/kubelet
 ```
 
+#### Enable the Volume Migration Controller (fork)
+
+The migration controller performs online cross-node disk moves. It requires **root** Proxmox
+credentials (token auth is not sufficient for disk migration) and stores them in a **separate**
+secret from the CSI controller config. Add the following to your helm values:
+
+```yaml
+migrator:
+  enabled: true
+  config:
+    clusters:
+      - url: https://cluster-api-1.exmple.com:8006/api2/json
+        insecure: false
+        username: "root@pam"
+        password: "super-secret"
+        region: Region-1
+        # Preferred storage per Proxmox node, used when the source storage
+        # name does not exist on the target node (pod-follow / evacuation):
+        primary_storage:
+          pve-1: local-zfs
+          pve-2: local-zfs
+  # Transient helper VM used to convert qcow2/vmdk volumes to raw before moving.
+  # Must be a free VMID and differ from the controller VMID (default 9999).
+  helperVMID: 9998
+  # Optional scheduled rebalance CronJob:
+  rebalance:
+    enabled: false
+    schedule: "0 3 * * *"
+```
+
+See the [Volume Migration Controller — Operator Guide](migration-controller.md) for the full annotation
+workflow (`csi.proxmox.sinextra.dev/migrate-node`, `evacuate`, rebalance, pod-follow).
+
 ### Install the plugin by using Talos machine config
 
 If you're running [Talos](https://www.talos.dev/) you can install Proxmox CSI plugin using the machine config
@@ -217,7 +250,7 @@ cluster:
   externalCloudProvider:
     enabled: true
     manifests:
-      - https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
+      - https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
 ```
 
 Or all together with the Proxmox Cloud Controller Manager
@@ -264,5 +297,5 @@ cluster:
     enabled: true
     manifests:
       - https://raw.githubusercontent.com/sergelogvinov/proxmox-cloud-controller-manager/main/docs/deploy/cloud-controller-manager.yml
-      - https://raw.githubusercontent.com/sergelogvinov/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
+      - https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
 ```

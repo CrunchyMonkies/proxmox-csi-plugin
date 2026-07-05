@@ -1,0 +1,75 @@
+{{- if and .Values.migrator.enabled .Values.migrator.rebalance.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-rebalance
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.migrator.rebalance.schedule | quote }}
+  # Never overlap: a previous rebalance may still be migrating.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A failed rebalance must not auto-retry and re-plan immediately.
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "proxmox-csi-plugin-migrator.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          enableServiceLinks: false
+          serviceAccountName: {{ include "proxmox-csi-plugin.serviceAccountName" . }}-migrator
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: rebalance
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              image: "{{ .Values.migrator.image.repository }}:{{ .Values.migrator.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.migrator.image.pullPolicy }}
+              command: ["/bin/pvecsictl"]
+              args:
+                - "rebalance"
+                - "--config={{ .Values.configFile }}"
+                - "--high-threshold={{ .Values.migrator.rebalance.highThreshold }}"
+                - "--low-threshold={{ .Values.migrator.rebalance.lowThreshold }}"
+                - "--max-migrations={{ .Values.migrator.rebalance.maxMigrations }}"
+                {{- if .Values.migrator.rebalance.window }}
+                - "--window={{ .Values.migrator.rebalance.window }}"
+                - "--window-tz={{ .Values.migrator.rebalance.windowTz }}"
+                {{- end }}
+                {{- range .Values.migrator.rebalance.extraArgs }}
+                - {{ . | quote }}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.migrator.resources | nindent 16 }}
+              volumeMounts:
+                - name: cloud-config
+                  mountPath: /etc/proxmox/
+          volumes:
+            {{- if .Values.migrator.existingConfigSecret }}
+            - name: cloud-config
+              secret:
+                secretName: {{ .Values.migrator.existingConfigSecret }}
+                items:
+                  - key: {{ .Values.migrator.existingConfigSecretKey }}
+                    path: config.yaml
+            {{- else }}
+            - name: cloud-config
+              secret:
+                secretName: {{ include "proxmox-csi-plugin.fullname" . }}-migrator
+            {{- end }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

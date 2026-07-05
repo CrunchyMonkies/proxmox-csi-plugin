@@ -37,6 +37,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set image owner
+        run: echo "USERNAME=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       - name: Build and push
         timeout-minutes: 10
         run: make images
@@ -60,6 +63,10 @@ jobs:
 
   build-publish-cli:
     name: "Publish cli tool"
+    # Only runs on the upstream repo. The fork lacks the BOT_APP_* / HOMEBREW_TOKEN
+    # secrets and the sergelogvinov/homebrew-tap, so this job is skipped there
+    # (keeping tag releases green); image publishing above is independent.
+    if: ${{ github.repository_owner == 'sergelogvinov' }}
     timeout-minutes: 15
     runs-on: ubuntu-24.04
     permissions:

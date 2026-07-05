@@ -1,9 +1,11 @@
 name: HelmChart Release
 
 on:
+  workflow_dispatch: {}
   push:
     branches:
       - main
+      - ouchi
     paths:
       - "charts/**"
 
@@ -35,6 +37,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image owner
+        run: echo "USERNAME=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
       - name: Helm release
         timeout-minutes: 5

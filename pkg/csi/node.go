@@ -215,6 +215,22 @@ func (n *NodeService) NodeStageVolume(_ context.Context, request *csi.NodeStageV
 		}
 	}
 
+	if params.RootDirPermissions != "" {
+		mode, perr := strconv.ParseUint(params.RootDirPermissions, 8, 32)
+		if perr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid rootDirPermissions %q: %v", params.RootDirPermissions, perr)
+		}
+
+		// Non-recursive: only the volume root directory is adjusted so a non-root pod can
+		// initialize a freshly formatted volume when the driver runs with fsGroupPolicy: None.
+		// Application-managed data subdirectories keep their own permissions.
+		if cerr := os.Chmod(stagingTarget, os.FileMode(mode)); cerr != nil {
+			return nil, status.Errorf(codes.Internal, "failed to chmod root dir %q: %v", stagingTarget, cerr)
+		}
+
+		klog.V(5).InfoS("NodeStageVolume: set root dir permissions", "path", stagingTarget, "mode", params.RootDirPermissions)
+	}
+
 	klog.V(3).InfoS("NodeStageVolume: volume mounted", "device", devicePath, "resized", requiredResize)
 
 	return &csi.NodeStageVolumeResponse{}, nil
@@ -272,7 +288,7 @@ func (n *NodeService) NodeUnstageVolume(_ context.Context, request *csi.NodeUnst
 	} else {
 		deviceName := filepath.Base(devicePath)
 
-		if err = os.WriteFile(fmt.Sprintf("/sys/block/%s/device/state", deviceName), []byte("offline"), 0644); err != nil { //nolint:gofumpt
+		if err = os.WriteFile(fmt.Sprintf("/sys/block/%s/device/state", deviceName), []byte("offline"), 0o644); err != nil { //nolint:gofumpt
 			klog.InfoS("NodeUnstageVolume: failed to offline device, ignored", "device", devicePath)
 		}
 	}

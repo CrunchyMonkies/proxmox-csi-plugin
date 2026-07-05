@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"time"
 
+	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +33,7 @@ import (
 )
 
 // PVCResources returns the PersistentVolumeClaim and PersistentVolume resources.
-func PVCResources(ctx context.Context, clientset *clientkubernetes.Clientset, namespace, pvcName string) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, error) {
+func PVCResources(ctx context.Context, clientset clientkubernetes.Interface, namespace, pvcName string) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, error) {
 	pvc, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get PersistentVolumeClaims: %v", err)
@@ -46,7 +48,7 @@ func PVCResources(ctx context.Context, clientset *clientkubernetes.Clientset, na
 }
 
 // PVCPodUsage returns the list of pods and the node that are using the specified PersistentVolumeClaim.
-func PVCPodUsage(ctx context.Context, clientset *clientkubernetes.Clientset, namespace, pvcName string) (pods []string, node string, err error) {
+func PVCPodUsage(ctx context.Context, clientset clientkubernetes.Interface, namespace, pvcName string) (pods []string, node string, err error) {
 	podList, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to list pods: %v", err)
@@ -68,10 +70,40 @@ func PVCPodUsage(ctx context.Context, clientset *clientkubernetes.Clientset, nam
 	return pods, node, nil
 }
 
+// PVCPodPlacement returns a map of pod name to node name for every pod that
+// references the PersistentVolumeClaim and has been scheduled to a node.
+// Unlike PVCPodUsage it includes Pending pods with an assigned node (e.g.
+// pods stuck in ContainerCreating because the volume cannot attach) and
+// excludes terminal pods.
+func PVCPodPlacement(ctx context.Context, clientset clientkubernetes.Interface, namespace, pvcName string) (map[string]string, error) {
+	podList, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods: %v", err)
+	}
+
+	placement := map[string]string{}
+
+	for _, pod := range podList.Items {
+		if pod.Spec.NodeName == "" || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+
+		for _, volume := range pod.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvcName {
+				placement[pod.Name] = pod.Spec.NodeName
+
+				break
+			}
+		}
+	}
+
+	return placement, nil
+}
+
 // PVCCreateOrUpdate creates or updates the specified PersistentVolumeClaim resource.
 func PVCCreateOrUpdate(
 	ctx context.Context,
-	clientset *clientkubernetes.Clientset,
+	clientset clientkubernetes.Interface,
 	pvc *corev1.PersistentVolumeClaim,
 ) (*corev1.PersistentVolumeClaim, error) {
 	res, err := clientset.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
@@ -93,8 +125,36 @@ func PVCCreateOrUpdate(
 	return res, err
 }
 
+// PVsInZone returns the PersistentVolumes provisioned by the given CSI driver
+// whose volume handle places them in the given region and zone.
+func PVsInZone(ctx context.Context, clientset clientkubernetes.Interface, driver, region, zone string) ([]corev1.PersistentVolume, error) {
+	pvList, err := clientset.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list PersistentVolumes: %v", err)
+	}
+
+	pvs := []corev1.PersistentVolume{}
+
+	for _, pv := range pvList.Items {
+		if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != driver {
+			continue
+		}
+
+		vol, err := volume.NewVolumeFromVolumeID(pv.Spec.CSI.VolumeHandle)
+		if err != nil {
+			continue
+		}
+
+		if vol.Region() == region && vol.Zone() == zone {
+			pvs = append(pvs, pv)
+		}
+	}
+
+	return pvs, nil
+}
+
 // PVWaitDelete waits for the specified PersistentVolume to be deleted.
-func PVWaitDelete(ctx context.Context, clientset *clientkubernetes.Clientset, pvName string) error {
+func PVWaitDelete(ctx context.Context, clientset clientkubernetes.Interface, pvName string) error {
 	if _, err := clientset.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{}); err != nil {
 		if errors.IsNotFound(err) {
 			return nil

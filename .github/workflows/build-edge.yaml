@@ -1,9 +1,11 @@
 name: Build edge
 
 on:
+  workflow_dispatch: {}
   push:
     branches:
       - main
+      - ouchi
     paths:
       - "go.mod"
       - "go.sum"
@@ -42,16 +44,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set image owner
+        run: echo "USERNAME=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       - name: Build and push
         timeout-minutes: 10
         run: make images
         env:
-          USERNAME: ${{ github.repository_owner }}
           PUSH: "true"
           TAG: "edge"
       - name: Sign images
         timeout-minutes: 4
         run: make images-cosign
         env:
-          USERNAME: ${{ github.repository_owner }}
           TAG: "edge"

@@ -114,6 +114,19 @@ func Test_ExtractAndDefaultParameters(t *testing.T) {
 				ReplicateZones: "zone1,zone2",
 			},
 		},
+		{
+			msg: "root dir permissions",
+			params: map[string]string{
+				csi.StorageIDKey:     "local-lvm",
+				"rootDirPermissions": "0777",
+			},
+			storage: csi.StorageParameters{
+				StorageID:          "local-lvm",
+				Backup:             ptr.Ptr(false),
+				IOThread:           true,
+				RootDirPermissions: "0777",
+			},
+		},
 	}
 
 	for _, testCase := range tests {
@@ -191,6 +204,19 @@ func Test_ToMap(t *testing.T) {
 				"replicate":       "0",
 				"resizeRequired":  "1",
 				"resizeSizeBytes": "1073741824",
+			},
+		},
+		{
+			msg: "root dir permissions",
+			storage: csi.StorageParameters{
+				StorageID:          "local-lvm",
+				RootDirPermissions: "0777",
+			},
+			params: map[string]string{
+				"iothread":           "0",
+				"replicate":          "0",
+				"storage":            "local-lvm",
+				"rootDirPermissions": "0777",
 			},
 		},
 	}

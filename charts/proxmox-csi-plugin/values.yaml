@@ -30,6 +30,16 @@ serviceAccount:
 # Currently, cannot be customized.
 provisionerName: csi.proxmox.sinextra.dev
 
+# CSIDriver object settings.
+csidriver:
+  # -- fsGroupPolicy controls whether kubelet recursively applies the pod's fsGroup to
+  # the volume. `None` disables it (volumes keep their own permissions); use the
+  # `rootDirPermissions` StorageClass parameter to make fresh volumes writable by
+  # non-root pods. `ReadWriteOnceWithFSType` (the previous default) breaks workloads
+  # such as Postgres that reject group-writable data directories. Note: this field is
+  # immutable on an existing CSIDriver; changing it requires recreating the object.
+  fsGroupPolicy: None
+
 # -- Cluster name.
 # Currently, cannot be customized.
 clusterID: kubernetes
@@ -115,7 +125,7 @@ controller:
   plugin:
     # -- Controller CSI Driver.
     image:
-      repository: ghcr.io/sergelogvinov/proxmox-csi-controller
+      repository: ghcr.io/crunchymonkies/proxmox-csi-controller
       pullPolicy: IfNotPresent
       # Overrides the image tag whose default is the chart appVersion.
       tag: ""
@@ -197,7 +207,7 @@ node:
   plugin:
     # -- Node CSI Driver.
     image:
-      repository: ghcr.io/sergelogvinov/proxmox-csi-node
+      repository: ghcr.io/crunchymonkies/proxmox-csi-node
       pullPolicy: IfNotPresent
       # Overrides the image tag whose default is the chart appVersion.
       tag: ""
@@ -367,3 +377,101 @@ extraVolumeMounts: []
 # - mountPath: /etc/ssl/certs/ca-certificates.crt
 #   name: ca
 #   subPath: ca.crt
+
+# -- Volume migration controller (pvecsictl controller).
+# Watches PVCs for csi.proxmox.sinextra.dev/migrate-node annotations and Nodes
+# for csi.proxmox.sinextra.dev/evacuate annotations, and migrates the backing
+# Proxmox disks automatically. Requires Proxmox root credentials.
+migrator:
+  # -- Enable the migration controller deployment.
+  enabled: false
+
+  # -- Number of replicas; leader election ensures only one acts.
+  replicaCount: 1
+
+  image:
+    # -- Migrator (pvecsictl) image.
+    repository: ghcr.io/crunchymonkies/pvecsictl
+    # -- Overrides the image tag whose default is the chart appVersion.
+    tag: ""
+    # -- Always or IfNotPresent.
+    pullPolicy: IfNotPresent
+
+  # -- Proxmox cluster config with ROOT credentials (username/password), the
+  # same schema as `config`. Token auth is not sufficient for disk migration.
+  # Stored in a separate secret from the CSI controller config.
+  config:
+    clusters: []
+    #   - url: https://cluster-api-1.exmple.com:8006/api2/json
+    #     insecure: false
+    #     username: root@pam
+    #     password: "strong-password"
+    #     region: cluster-1
+    #     # Preferred storage per Proxmox node, used by pod-follow/evacuation
+    #     # when the source storage name does not exist on the target node.
+    #     primary_storage:
+    #       pve-3: local-zfs
+
+  # -- Existing secret name for the migrator cloud config (overrides `migrator.config`).
+  existingConfigSecret: ~
+  # -- Existing secret key for the migrator cloud config.
+  existingConfigSecretKey: config.yaml
+
+  # -- Enable leader election.
+  leaderElection: true
+
+  # -- Volume follows pods: automatically migrate a volume when every pod
+  # mounting it has been scheduled in a different zone (e.g. after VM
+  # migration). Storage is matched by name, falling back to the cluster's
+  # `primary_storage` map.
+  podFollow: false
+
+  # -- Maximum migration attempts per PVC before marking it Failed.
+  maxAttempts: 5
+
+  # -- VM ID of the transient helper VM used to convert qcow2/vmdk volumes
+  # to raw during migration. Must be a free VM ID and must differ from the
+  # controller VMID.
+  helperVMID: 9998
+
+  # -- Proxmox disk move task timeout in seconds.
+  taskTimeout: 10800
+
+  # -- Maximum time to wait for pods to terminate during force-drain.
+  drainTimeout: 10m
+
+  # -- Maximum time to wait for a disk to detach from a VM.
+  detachTimeout: 5m
+
+  # -- Prometheus metrics for the migrator.
+  metrics:
+    enabled: false
+    port: 8081
+
+  # -- Additional migrator container arguments.
+  extraArgs: []
+
+  # -- Migrator resource requests and limits.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+  # -- Scheduled rebalancing of idle volumes from overloaded Proxmox nodes.
+  rebalance:
+    # -- Enable the rebalance CronJob.
+    enabled: false
+    # -- Rebalance schedule (cron format).
+    schedule: "0 3 * * *"
+    # -- Zones above this used fraction are rebalancing sources.
+    highThreshold: 0.80
+    # -- Only zones below this used fraction are rebalancing targets.
+    lowThreshold: 0.60
+    # -- Maximum volumes to move per run.
+    maxMigrations: 2
+    # -- Maintenance window "HH:MM-HH:MM"; outside it the job exits immediately.
+    window: ""
+    # -- IANA time zone for the maintenance window.
+    windowTz: "UTC"
+    # -- Additional rebalance arguments.
+    extraArgs: []
