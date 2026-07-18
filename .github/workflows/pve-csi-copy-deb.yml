@@ -26,7 +26,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            debhelper dpkg-dev devscripts lintian perl
+            build-essential debhelper dpkg-dev devscripts lintian perl
 
       - name: Static checks
         working-directory: hack/pve-token-copy
