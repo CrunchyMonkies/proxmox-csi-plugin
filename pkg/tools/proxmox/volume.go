@@ -123,7 +123,7 @@ func DeleteDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.V
 // MoveQemuDisk moves the volume to the given node, into the storage and disk
 // name carried by targetVol (the API's target parameter accepts a full volume
 // identifier in storage:disk form, allowing cross-storage moves and renames).
-func MoveQemuDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.Volume, node string, targetVol *volume.Volume, taskTimeout int) error {
+func MoveQemuDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.Volume, node string, targetVol *volume.Volume, taskTimeout int, tokenEndpoint bool) error {
 	params := map[string]interface{}{
 		"node":        vol.Node(),
 		"target":      targetVol.VolID(),
@@ -131,10 +131,26 @@ func MoveQemuDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume
 		"volume":      vol.Disk(),
 	}
 
-	// POST https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/storage/{storage}/content/{volume}
-	// Copy a volume. This is experimental code - do not use.
+	// Copy a volume to another storage/node.
+	//
+	// By default this uses PVE's built-in content "copy" method:
+	//   POST /nodes/{node}/storage/{storage}/content/{volume}
+	// which has no permissions block and is therefore restricted to root@pam
+	// ("experimental code - do not use" upstream).
+	//
+	// When tokenEndpoint is set, it targets the permission-gated sibling added by
+	// hack/pve-token-copy (POST .../content/{volume}/copy). That method takes the
+	// same parameters but is authorized by PVE ACL — Datastore.Audit on the source
+	// and Datastore.AllocateSpace on the target — so a scoped API token performs the
+	// copy and no root@pam credential is needed. It must be installed on the Proxmox
+	// nodes (the pve-csi-copy package); see hack/pve-token-copy/README.md.
+	path := fmt.Sprintf("/nodes/%s/storage/%s/content/%s", vol.Node(), vol.Storage(), vol.Disk())
+	if tokenEndpoint {
+		path += "/copy"
+	}
+
 	var upid proxmox.UPID
-	if err := cluster.Client.Post(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content/%s", vol.Node(), vol.Storage(), vol.Disk()), params, &upid); err != nil {
+	if err := cluster.Client.Post(ctx, path, params, &upid); err != nil {
 		return fmt.Errorf("failed to copy pvc: %v, params=%+v", err, params)
 	}
 

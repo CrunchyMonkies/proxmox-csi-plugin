@@ -92,15 +92,16 @@ func setEvacuateCmdFlags(cmd *cobra.Command) {
 func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 	flags := cmd.Flags()
 
-	region, _ := flags.GetString("region")         //nolint: errcheck
-	target, _ := flags.GetString("target")         //nolint: errcheck
-	headroom, _ := flags.GetFloat64("headroom")    //nolint: errcheck
-	force, _ := flags.GetBool("force")             //nolint: errcheck
-	dryRun, _ := flags.GetBool("dry-run")          //nolint: errcheck
-	now, _ := flags.GetBool("now")                 //nolint: errcheck
-	maxFailures, _ := flags.GetInt("max-failures") //nolint: errcheck
-	taskTimeout, _ := flags.GetInt("timeout")      //nolint: errcheck
-	helperVMID, _ := flags.GetInt("helper-vmid")   //nolint: errcheck
+	region, _ := flags.GetString("region")                       //nolint: errcheck
+	target, _ := flags.GetString("target")                       //nolint: errcheck
+	headroom, _ := flags.GetFloat64("headroom")                  //nolint: errcheck
+	force, _ := flags.GetBool("force")                           //nolint: errcheck
+	dryRun, _ := flags.GetBool("dry-run")                        //nolint: errcheck
+	now, _ := flags.GetBool("now")                               //nolint: errcheck
+	maxFailures, _ := flags.GetInt("max-failures")               //nolint: errcheck
+	taskTimeout, _ := flags.GetInt("timeout")                    //nolint: errcheck
+	helperVMID, _ := flags.GetInt("helper-vmid")                 //nolint: errcheck
+	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
 
 	ctx := context.Background()
 	zone := args[0]
@@ -205,10 +206,11 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 
 	// Synchronous mode: migrate one volume at a time.
 	m := &migrator.Migrator{
-		KClient:    c.kclient,
-		PClient:    c.pclient,
-		Logger:     logger,
-		HelperVMID: helperVMID,
+		KClient:           c.kclient,
+		PClient:           c.pclient,
+		Logger:            logger,
+		HelperVMID:        helperVMID,
+		TokenCopyEndpoint: tokenCopyEndpoint,
 	}
 
 	failures := 0
@@ -275,13 +277,13 @@ func (c *evacuateCmd) evacuateValidate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to read config: %v", err)
 	}
 
-	// Synchronous migration moves disks through the Proxmox API and requires
-	// root credentials; annotation mode only needs API read access.
+	// Synchronous migration moves disks through the Proxmox API and needs copy
+	// credentials (root@pam, or an API token with --token-copy-endpoint);
+	// annotation mode only needs API read access.
 	if now, _ := flags.GetBool("now"); now { //nolint: errcheck
-		for _, cl := range cfg.Clusters {
-			if cl.Username == "" || cl.Password == "" {
-				return fmt.Errorf("--now requires Proxmox root account, please provide username and password in config file (cluster=%s)", cl.Region)
-			}
+		tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
+		if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint); err != nil {
+			return err
 		}
 	}
 

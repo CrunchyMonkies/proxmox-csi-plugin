@@ -70,16 +70,18 @@ func setMigrateCmdFlags(cmd *cobra.Command) {
 
 func (c *migrateCmd) runMigration(cmd *cobra.Command, args []string) error {
 	flags := cmd.Flags()
-	force, _ := flags.GetBool("force")             //nolint: errcheck
-	taskTimeout, _ := flags.GetInt("timeout")      //nolint: errcheck
-	targetStorage, _ := flags.GetString("storage") //nolint: errcheck
-	helperVMID, _ := flags.GetInt("helper-vmid")   //nolint: errcheck
+	force, _ := flags.GetBool("force")                           //nolint: errcheck
+	taskTimeout, _ := flags.GetInt("timeout")                    //nolint: errcheck
+	targetStorage, _ := flags.GetString("storage")               //nolint: errcheck
+	helperVMID, _ := flags.GetInt("helper-vmid")                 //nolint: errcheck
+	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
 
 	m := &migrator.Migrator{
-		KClient:    c.kclient,
-		PClient:    c.pclient,
-		Logger:     logger,
-		HelperVMID: helperVMID,
+		KClient:           c.kclient,
+		PClient:           c.pclient,
+		Logger:            logger,
+		HelperVMID:        helperVMID,
+		TokenCopyEndpoint: tokenCopyEndpoint,
 	}
 
 	err := m.Migrate(context.Background(), migrator.Request{
@@ -108,10 +110,9 @@ func (c *migrateCmd) migrationValidate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to read config: %v", err)
 	}
 
-	for _, c := range cfg.Clusters {
-		if c.Username == "" || c.Password == "" {
-			return fmt.Errorf("this command requires Proxmox root account, please provide username and password in config file (cluster=%s)", c.Region)
-		}
+	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
+	if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint); err != nil {
+		return err
 	}
 
 	c.pclient, err = pxpool.NewProxmoxPool(cfg.Clusters)
