@@ -117,3 +117,28 @@ func TestCheckClusters(t *testing.T) {
 	assert.NotNil(t, err)
 	assert.Contains(t, err.Error(), "failed to initialized proxmox client in region")
 }
+
+func TestTokenCopyEndpoint(t *testing.T) {
+	truePtr, falsePtr := true, false
+
+	cfg := []*pxpool.ProxmoxCluster{
+		{URL: "https://127.0.0.1:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "unset"},
+		{URL: "https://127.0.0.2:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "on", TokenCopyEndpoint: &truePtr},
+		{URL: "https://127.0.0.3:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "off", TokenCopyEndpoint: &falsePtr},
+	}
+
+	pool, err := pxpool.NewProxmoxPool(cfg)
+	assert.Nil(t, err)
+
+	// Unset cluster follows the fallback (the global --token-copy-endpoint flag).
+	assert.False(t, pool.TokenCopyEndpoint("unset", false))
+	assert.True(t, pool.TokenCopyEndpoint("unset", true))
+
+	// Per-cluster override wins over the fallback in both directions.
+	assert.True(t, pool.TokenCopyEndpoint("on", false))
+	assert.False(t, pool.TokenCopyEndpoint("off", true))
+
+	// Unknown region falls back.
+	assert.True(t, pool.TokenCopyEndpoint("does-not-exist", true))
+	assert.False(t, pool.TokenCopyEndpoint("does-not-exist", false))
+}

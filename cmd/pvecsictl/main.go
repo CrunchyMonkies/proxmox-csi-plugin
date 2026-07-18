@@ -113,7 +113,7 @@ func run() int {
 	cmd.PersistentFlags().StringVar(&kubeconfig, flagKubeConfig, "", "kubernetes config file")
 
 	cmd.PersistentFlags().Bool(flagTokenCopyEndpoint, false,
-		"copy volumes via the token-authorized endpoint (hack/pve-token-copy) instead of the root@pam-only built-in copy method; requires the pve-csi-copy package on the Proxmox nodes")
+		"use the token-authorized copy endpoint (hack/pve-token-copy) instead of the root@pam-only built-in copy; needs the pve-csi-copy package on nodes; per-cluster override: token_copy_endpoint")
 
 	cmd.AddCommand(buildMigrateCmd())
 	cmd.AddCommand(buildRenameCmd())

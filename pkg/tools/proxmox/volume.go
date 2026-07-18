@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -28,6 +29,20 @@ import (
 	goproxmox "github.com/sergelogvinov/go-proxmox"
 	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
 )
+
+// escapeVolumePath percent-escapes each '/'-separated segment of a Proxmox volume or
+// disk identifier so a crafted value cannot inject extra path segments or a query
+// string into the API URL (the REST client concatenates paths without escaping). It
+// preserves the '/' separators used by directory-storage volume names; for the normal
+// PVE volume-name character set it is a no-op.
+func escapeVolumePath(s string) string {
+	parts := strings.Split(s, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+
+	return strings.Join(parts, "/")
+}
 
 // WaitForVolumeDetach waits for the volume to be detached from the VM.
 // vmID is the Proxmox VM ID of the Kubernetes node that was using the volume.
@@ -83,7 +98,7 @@ func DiskOnNode(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.V
 		Size  int64  `json:"size"`
 	}{}
 
-	if err := cluster.Client.Get(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content", node, vol.Storage()), &content); err != nil {
+	if err := cluster.Client.Get(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content", url.PathEscape(node), url.PathEscape(vol.Storage())), &content); err != nil {
 		return false, 0, fmt.Errorf("failed to list storage content on node %s: %v", node, err)
 	}
 
@@ -101,7 +116,7 @@ func DiskOnNode(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.V
 // moves before retrying.
 func DeleteDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.Volume, node string, taskTimeout int) error {
 	var upid proxmox.UPID
-	if err := cluster.Client.Delete(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content/%s", node, vol.Storage(), vol.Disk()), &upid); err != nil {
+	if err := cluster.Client.Delete(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content/%s", url.PathEscape(node), url.PathEscape(vol.Storage()), escapeVolumePath(vol.Disk())), &upid); err != nil {
 		return fmt.Errorf("failed to delete disk %s on node %s: %v", vol.Disk(), node, err)
 	}
 
@@ -144,7 +159,7 @@ func MoveQemuDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume
 	// and Datastore.AllocateSpace on the target — so a scoped API token performs the
 	// copy and no root@pam credential is needed. It must be installed on the Proxmox
 	// nodes (the pve-csi-copy package); see hack/pve-token-copy/README.md.
-	path := fmt.Sprintf("/nodes/%s/storage/%s/content/%s", vol.Node(), vol.Storage(), vol.Disk())
+	path := fmt.Sprintf("/nodes/%s/storage/%s/content/%s", url.PathEscape(vol.Node()), url.PathEscape(vol.Storage()), escapeVolumePath(vol.Disk()))
 	if tokenEndpoint {
 		path += "/copy"
 	}

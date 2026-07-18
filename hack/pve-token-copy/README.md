@@ -100,16 +100,19 @@ running guests and existing CSI mounts are unaffected), and it must be present o
 **every** PVE node CSI targets.
 
 ## Migrator configuration change
-With this installed, the migrator no longer needs `root@pam`. Point its cloud config
-at a **token** and change `MoveQemuDisk` to call `.../content/{volume}/copy` (this
-endpoint) instead of the raw `copy` method. The token needs, on the CSI storages:
+With this installed, the migrator (`pvecsictl` / the migration controller) no longer
+needs `root@pam`. Pass **`--token-copy-endpoint`** (or set `token_copy_endpoint: true`
+per cluster in the cloud-config) and point the cloud config at a **token** — omit
+`username`/`password`, since the client prefers them when both are present. On the CSI
+storages the token needs:
 - `Datastore.Audit` (+ access to the source volumes — for CSI-owned volumes the
   `kubernetes-csi@pve` identity already owns them) on the **source**, and
 - `Datastore.AllocateSpace` on the **target**.
 
-The existing `kubernetes-csi@pve` token already carries the storage privileges; add
-`Datastore.Audit` to its role if it isn't there. The migrator then holds only a scoped
-token — no root credential in the cluster.
+It also needs the privileges the rest of the migration uses: `VM.Audit`, `VM.Allocate`
++ `VM.Config.Disk` (qcow2/vmdk helper-VM conversion), and `Datastore.Allocate`
+(partial-file / helper cleanup). The migrator then holds only a scoped token — no root
+credential in the cluster. See [migration-controller.md](../../docs/migration-controller.md).
 
 ## Caveats / must-validate before production
 - **Per-major-version validation.** This couples to PVE internals (`register_method`,

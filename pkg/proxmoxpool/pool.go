@@ -46,6 +46,14 @@ type ProxmoxCluster struct {
 	Password        string `yaml:"password,omitempty"`
 	Region          string `yaml:"region,omitempty"`
 
+	// TokenCopyEndpoint selects, per cluster, whether volume migration copies via
+	// the permission-gated endpoint from hack/pve-token-copy (token-authorized)
+	// instead of PVE's built-in root@pam-only copy method. When nil, the migrator's
+	// global default (the --token-copy-endpoint CLI flag) applies. Set it per cluster
+	// so a mixed fleet — some nodes with the pve-csi-copy package, some without —
+	// routes each cluster correctly.
+	TokenCopyEndpoint *bool `yaml:"token_copy_endpoint,omitempty"`
+
 	// PrimaryStorage maps a Proxmox node name to its preferred storage ID.
 	// Used by volume migration when the source storage name does not exist
 	// on the target node.
@@ -55,6 +63,8 @@ type ProxmoxCluster struct {
 // ProxmoxPool is a Proxmox client pool of proxmox clusters.
 type ProxmoxPool struct {
 	clients map[string]*goproxmox.APIClient
+	// tokenCopyEndpoint holds the per-region TokenCopyEndpoint override (nil = unset).
+	tokenCopyEndpoint map[string]*bool
 }
 
 // NewProxmoxPool creates a new Proxmox cluster client.
@@ -62,6 +72,7 @@ func NewProxmoxPool(config []*ProxmoxCluster, options ...proxmox.Option) (*Proxm
 	clusters := len(config)
 	if clusters > 0 {
 		clients := make(map[string]*goproxmox.APIClient, clusters)
+		tokenCopyEndpoint := make(map[string]*bool, clusters)
 
 		for _, cfg := range config {
 			opts := []proxmox.Option{proxmox.WithUserAgent("ProxmoxCSIPlugin/1.0")}
@@ -111,14 +122,27 @@ func NewProxmoxPool(config []*ProxmoxCluster, options ...proxmox.Option) (*Proxm
 			}
 
 			clients[cfg.Region] = pxClient
+			tokenCopyEndpoint[cfg.Region] = cfg.TokenCopyEndpoint
 		}
 
 		return &ProxmoxPool{
-			clients: clients,
+			clients:           clients,
+			tokenCopyEndpoint: tokenCopyEndpoint,
 		}, nil
 	}
 
 	return nil, ErrClustersNotFound
+}
+
+// TokenCopyEndpoint reports whether volume migration on the given region should use
+// the token-authorized copy endpoint. The per-cluster config value wins when set;
+// otherwise fallback (the migrator's global default) applies.
+func (c *ProxmoxPool) TokenCopyEndpoint(region string, fallback bool) bool {
+	if v, ok := c.tokenCopyEndpoint[region]; ok && v != nil {
+		return *v
+	}
+
+	return fallback
 }
 
 // GetRegions returns supported regions.
