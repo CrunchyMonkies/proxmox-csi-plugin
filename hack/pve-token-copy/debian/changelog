@@ -1,0 +1,8 @@
+pve-csi-copy (0.1.0) unstable; urgency=medium
+
+  * Initial packaging of the token-authorised copy-volume endpoint for the
+    proxmox-csi-plugin migration controller. Ships the self-contained Perl
+    module tree, the pvedaemon/pveproxy loader drop-ins (managed by the
+    maintainer scripts), and /usr/sbin/pve-csi-copy-verify.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Sun, 19 Jul 2026 00:00:00 +0000

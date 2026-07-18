@@ -1,0 +1,20 @@
+#!/bin/sh
+# Remove the loader drop-ins BEFORE dpkg deletes the module files, then restart the
+# daemons — so a restart can never reference a module that is about to disappear
+# (which would keep pvedaemon/pveproxy from starting). Runs on both remove and the
+# remove half of an upgrade; postinst re-adds the drop-ins for the new version.
+set -e
+
+DPD=/etc/systemd/system/pvedaemon.service.d/10-pve-csi-copy.conf
+DPP=/etc/systemd/system/pveproxy.service.d/10-pve-csi-copy.conf
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        rm -f "$DPD" "$DPP"
+        systemctl daemon-reload || true
+        systemctl restart pvedaemon pveproxy || true
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

@@ -1,0 +1,67 @@
+name: pve-csi-copy deb
+
+on:
+  push:
+    tags:
+      - 'pve-csi-copy-v*'
+  pull_request:
+    paths:
+      - 'hack/pve-token-copy/**'
+      - '.github/workflows/pve-csi-copy-deb.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            debhelper dpkg-dev devscripts lintian perl
+
+      - name: Static checks
+        working-directory: hack/pve-token-copy
+        run: |
+          perl -c perl/PVECSICopy.pm
+          perl -c perl/PVECSICopy/Impl.pm
+          bash -n install.sh
+          sh -n pkg/pve-csi-copy-verify
+          for f in debian/postinst debian/prerm debian/postrm; do sh -n "$f"; done
+
+      - name: Build deb
+        working-directory: hack/pve-token-copy
+        run: dpkg-buildpackage -b -us -uc
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p dist
+          mv hack/*.deb dist/
+          ls -l dist
+
+      - name: Lintian (informational)
+        run: lintian dist/*.deb || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pve-csi-copy-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.deb \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

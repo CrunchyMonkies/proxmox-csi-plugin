@@ -50,29 +50,11 @@ remove_files() {
   rm -rf /usr/lib/pve-csi-copy
 }
 
-verify() {
-  # Assert the RUNNING daemons — not just a fresh interpreter — actually loaded and
-  # registered the endpoint.
-  systemctl is-active --quiet pvedaemon || die "pvedaemon is not active"
-  systemctl is-active --quiet pveproxy  || die "pveproxy is not active"
-
-  # If either daemon took the module's fail-safe path, the endpoint is NOT live.
-  if journalctl -u pvedaemon -u pveproxy --since "-3 min" 2>/dev/null \
-      | grep -q "PVECSICopy: endpoint NOT registered"; then
-    die "module loaded but registration failed (see: journalctl -u pvedaemon -u pveproxy) — endpoint not live"
-  fi
-
-  # Secondary: the method resolves via the class (also catches a broken module file).
-  PERL5LIB="$MODDIR" perl -MPVECSICopy::Impl -e '
-    PVECSICopy::Impl::register();
-    require PVE::API2::Storage::Content;
-    my $info = PVE::API2::Storage::Content->map_method_by_name("copy_volume_token");
-    die "not registered\n" unless $info;
-    print "ok: $info->{method} .../$info->{path}\n";
-  ' >/dev/null 2>&1 || die "endpoint failed to register (module-level check)"
-
-  echo "verify: ok — pvedaemon/pveproxy active, copy_volume_token registered"
-}
+# Canonical verification lives in pkg/pve-csi-copy-verify (also shipped by the .deb
+# as /usr/sbin/pve-csi-copy-verify) so install.sh and the package agree.
+# shellcheck source=pkg/pve-csi-copy-verify
+. "$SELF/pkg/pve-csi-copy-verify"
+verify() { pve_csi_copy_verify; }
 
 case "${1:-install}" in
 install)

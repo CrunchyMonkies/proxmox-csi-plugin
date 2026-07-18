@@ -1,0 +1,37 @@
+#!/bin/sh
+# Install the loader drop-ins (from the dpkg-managed templates in /usr/share) and
+# restart pvedaemon/pveproxy so they load the module. The module tree in /usr/lib
+# is already in place at this point, so the loaders can safely reference it.
+set -e
+
+SRC=/usr/share/pve-csi-copy/systemd
+DPD=/etc/systemd/system/pvedaemon.service.d/10-pve-csi-copy.conf
+DPP=/etc/systemd/system/pveproxy.service.d/10-pve-csi-copy.conf
+
+case "$1" in
+    configure)
+        install -D -m 0644 "$SRC/pvedaemon.service.d/10-pve-csi-copy.conf" "$DPD"
+        install -D -m 0644 "$SRC/pveproxy.service.d/10-pve-csi-copy.conf"  "$DPP"
+
+        systemctl daemon-reload || true
+        # Env changes need a restart (reload does not re-read Environment=).
+        systemctl restart pvedaemon pveproxy
+
+        # Hard requirement: the daemons must come back up.
+        if ! systemctl is-active --quiet pvedaemon || ! systemctl is-active --quiet pveproxy; then
+            echo "pve-csi-copy: ERROR pvedaemon/pveproxy not active after restart" >&2
+            exit 1
+        fi
+
+        # Soft: endpoint registration. The module fails safe (daemons are up), so a
+        # registration failure is a warning, not an install failure.
+        if pve-csi-copy-verify >/dev/null 2>&1; then
+            echo "pve-csi-copy: endpoint registered."
+        else
+            echo "pve-csi-copy: WARNING endpoint did not register; daemons are up and PVE is unaffected. See: journalctl -u pvedaemon -u pveproxy" >&2
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

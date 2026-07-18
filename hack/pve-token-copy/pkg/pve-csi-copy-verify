@@ -1,0 +1,37 @@
+#!/bin/sh
+# Canonical verification for pve-csi-copy. Exit 0 iff pvedaemon AND pveproxy are
+# active AND the copy_volume_token endpoint is registered.
+#
+# Dual-use: source it to get the pve_csi_copy_verify function (install.sh does), or
+# run it directly (the .deb ships it as /usr/sbin/pve-csi-copy-verify, and Ansible
+# can call it as a check/handler).
+
+MODDIR=/usr/lib/pve-csi-copy/perl
+
+pve_csi_copy_verify() {
+    # The running daemons must be up (a failed module load would surface here).
+    systemctl is-active --quiet pvedaemon || { echo "pvedaemon is not active" >&2; return 1; }
+    systemctl is-active --quiet pveproxy  || { echo "pveproxy is not active" >&2; return 1; }
+
+    # If either daemon took the module's fail-safe path, the endpoint is NOT live.
+    if journalctl -u pvedaemon -u pveproxy --since "-3 min" 2>/dev/null \
+        | grep -q "PVECSICopy: endpoint NOT registered"; then
+        echo "module loaded but registration failed (see: journalctl -u pvedaemon -u pveproxy) — endpoint not live" >&2
+        return 1
+    fi
+
+    # Secondary: the method resolves via the class (also catches a broken module file).
+    PERL5LIB="$MODDIR" perl -MPVECSICopy::Impl -e '
+        PVECSICopy::Impl::register();
+        require PVE::API2::Storage::Content;
+        die "not registered\n" unless PVE::API2::Storage::Content->map_method_by_name("copy_volume_token");
+    ' >/dev/null 2>&1 || { echo "endpoint failed to register (module-level check)" >&2; return 1; }
+
+    echo "verify: ok — pvedaemon/pveproxy active, copy_volume_token registered"
+    return 0
+}
+
+# Run only when executed directly, not when sourced.
+case "${0##*/}" in
+    pve-csi-copy-verify|verify) pve_csi_copy_verify ;;
+esac

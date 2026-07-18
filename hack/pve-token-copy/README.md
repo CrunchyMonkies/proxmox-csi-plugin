@@ -67,16 +67,37 @@ the main review finding):
   fs access, or reach into storages/volumes outside its ACL.
 
 ## Install (per PVE node)
+This is a **host-level** package (systemd + Perl on the hypervisor) — it installs on
+each PVE node the CSI plugin targets, over SSH, not through the Proxmox API and not
+into a guest VM. Two ways:
+
+### 1. Debian package (recommended)
+A `.deb` is built by the [`pve-csi-copy deb`](../../.github/workflows/pve-csi-copy-deb.yml)
+GitHub Action — as a CI artifact on every PR, and attached to a GitHub Release when a
+`pve-csi-copy-v*` tag is pushed. Install it with `apt`/`dpkg`; its maintainer scripts
+place the loader drop-ins, restart `pvedaemon`/`pveproxy`, and verify registration.
+For a fleet, install it with **Ansible** — see [`ANSIBLE.md`](ANSIBLE.md).
+
+```bash
+apt install ./pve-csi-copy_0.1.0_all.deb      # or: dpkg -i …
+pve-csi-copy-verify                            # ships in the package
+```
+
+Build it locally the same way CI does:
+```bash
+cd hack/pve-token-copy && dpkg-buildpackage -b -us -uc   # -> ../pve-csi-copy_*.deb
+```
+
+### 2. install.sh (no packaging / dev)
 ```bash
 ./install.sh install     # drops module + loaders, restarts pvedaemon/pveproxy, verifies
 ./install.sh verify
 ./install.sh uninstall
 ```
-`install` restarts `pvedaemon`/`pveproxy` (a few seconds of API downtime; running
-guests and existing CSI mounts are unaffected).
 
-Ship it alongside the plugin (e.g. a small `.deb` or a DaemonSet-driven install) so
-every PVE node that CSI targets has it.
+Either way, install restarts `pvedaemon`/`pveproxy` (a few seconds of API downtime;
+running guests and existing CSI mounts are unaffected), and it must be present on
+**every** PVE node CSI targets.
 
 ## Migrator configuration change
 With this installed, the migrator no longer needs `root@pam`. Point its cloud config
