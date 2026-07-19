@@ -4,7 +4,12 @@ on:
   workflow_dispatch: {}
   push:
     tags:
-      - "v*"
+      # Fork releases are cut by pushing a bare semver tag (e.g. 1.0.0).
+      # CI derives the published tag as <upstream>-<fork>, e.g. v0.18.1-1.0.0.
+      # These patterns never match the derived v-prefixed tag, so the release
+      # step below cannot re-trigger this workflow.
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "[0-9]+.[0-9]+.[0-9]+-*" # prereleases, e.g. 1.0.0-rc.1
 
 jobs:
   build-publish:
@@ -12,7 +17,7 @@ jobs:
     timeout-minutes: 15
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       packages: write
       id-token: write
     steps:
@@ -20,6 +25,12 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Unshallow
         run: git fetch --prune --unshallow
+
+      - name: Compute release tag
+        run: |
+          FORK_VERSION="${GITHUB_REF_NAME}"          # e.g. 1.0.0
+          UPSTREAM="$(cat hack/upstream-version)"    # e.g. v0.18.1
+          echo "RELEASE_TAG=${UPSTREAM}-${FORK_VERSION}" >> "$GITHUB_ENV"
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -57,9 +68,20 @@ jobs:
         run: make images
         env:
           PUSH: "true"
+          TAG: ${{ env.RELEASE_TAG }}
       - name: Sign images
         timeout-minutes: 4
         run: make images-cosign
+        env:
+          TAG: ${{ env.RELEASE_TAG }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS=(--target "$GITHUB_SHA" --title "$RELEASE_TAG" --generate-notes)
+          [[ "$GITHUB_REF_NAME" == *-* ]] && ARGS+=(--prerelease)
+          gh release create "$RELEASE_TAG" "${ARGS[@]}"
 
   build-publish-cli:
     name: "Publish cli tool"
