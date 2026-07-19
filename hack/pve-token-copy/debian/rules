@@ -1,0 +1,8 @@
+#!/usr/bin/make -f
+# The drop-ins are installed to /usr/share (dpkg-managed) and copied into
+# /etc/systemd/system/*.service.d/ by the maintainer scripts, so they are never
+# treated as conffiles and removal ordering stays correct (loaders removed before
+# the module they name). No compiled artifacts — pure Perl + config.
+
+%:
+	dh $@

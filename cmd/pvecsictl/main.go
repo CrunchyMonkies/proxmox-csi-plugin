@@ -27,7 +27,34 @@ import (
 	cobra "github.com/spf13/cobra"
 
 	clilog "github.com/sergelogvinov/proxmox-csi-plugin/pkg/log"
+	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
 )
+
+// requireMigrationCredentials verifies each cluster carries credentials capable of
+// copying volumes. Without the token-authorized copy endpoint the copy runs through
+// PVE's built-in root@pam-only "copy" method, so username/password (a root account)
+// is required. With --token-copy-endpoint the copy is authorized by the token's ACL,
+// so an API token (or username/password) is accepted.
+func requireMigrationCredentials(clusters []*pxpool.ProxmoxCluster, tokenEndpoint bool) error {
+	for _, cl := range clusters {
+		hasUserPass := cl.Username != "" && cl.Password != ""
+
+		if !tokenEndpoint {
+			if !hasUserPass {
+				return fmt.Errorf("cluster %s: requires a Proxmox root account (username/password), or install the token copy endpoint and pass --%s", cl.Region, flagTokenCopyEndpoint)
+			}
+
+			continue
+		}
+
+		hasToken := (cl.TokenID != "" || cl.TokenIDFile != "") && (cl.TokenSecret != "" || cl.TokenSecretFile != "")
+		if !hasToken && !hasUserPass {
+			return fmt.Errorf("--%s requires an API token (token_id/token_secret) or username/password in the config file (cluster=%s)", flagTokenCopyEndpoint, cl.Region)
+		}
+	}
+
+	return nil
+}
 
 var (
 	command = "pvecsictl"
@@ -41,6 +68,8 @@ var (
 
 	flagProxmoxConfig = "config"
 	flagKubeConfig    = "kubeconfig"
+
+	flagTokenCopyEndpoint = "token-copy-endpoint"
 
 	logger *log.Entry
 )
@@ -82,6 +111,9 @@ func run() int {
 
 	cmd.PersistentFlags().StringVar(&cloudconfig, flagProxmoxConfig, "", "proxmox cluster config file")
 	cmd.PersistentFlags().StringVar(&kubeconfig, flagKubeConfig, "", "kubernetes config file")
+
+	cmd.PersistentFlags().Bool(flagTokenCopyEndpoint, false,
+		"use the token-authorized copy endpoint (hack/pve-token-copy) instead of the root@pam-only built-in copy; needs the pve-csi-copy package on nodes; per-cluster override: token_copy_endpoint")
 
 	cmd.AddCommand(buildMigrateCmd())
 	cmd.AddCommand(buildRenameCmd())

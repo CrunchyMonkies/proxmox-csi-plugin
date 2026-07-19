@@ -1,0 +1,13 @@
+#!/bin/sh
+# Drop-ins were already removed in prerm; just settle systemd's view after the
+# module files are gone. Empty *.service.d dirs left behind are harmless.
+set -e
+
+case "$1" in
+    remove|purge)
+        systemctl daemon-reload || true
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

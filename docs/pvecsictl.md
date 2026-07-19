@@ -66,14 +66,28 @@ Available Commands:
 
 ### Migrate
 
-Migration requires root privileges on the Proxmox cluster.
-You need to provide the cloud-config file with root credentials (username/password) to the Proxmox cluster.
+Migration requires root privileges on the Proxmox cluster by default, because the
+built-in disk-copy endpoint is root-only. Provide the cloud-config with root
+credentials (username/password):
 
 ```yaml
 clusters:
   - url: https://cluster-1:8006/api2/json
     username: root@pam
     password: "strong-password"
+    region: fsn1
+    ...
+```
+
+Alternatively, install the [`pve-csi-copy`](../hack/pve-token-copy/) package on the
+Proxmox nodes and pass `--token-copy-endpoint`; the copy then runs through a
+permission-gated endpoint and a scoped API token is sufficient (no `root@pam`):
+
+```yaml
+clusters:
+  - url: https://cluster-1:8006/api2/json
+    token_id: "kubernetes-csi@pve!csi"
+    token_secret: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     region: fsn1
     ...
 ```

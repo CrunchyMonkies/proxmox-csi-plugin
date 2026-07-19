@@ -128,6 +128,13 @@ type Migrator struct {
 	// HelperVMID is the VM ID of the transient helper VM used to convert
 	// qcow2/vmdk volumes (default DefaultHelperVMID).
 	HelperVMID int
+
+	// TokenCopyEndpoint routes the volume copy through the permission-gated
+	// endpoint from hack/pve-token-copy (POST .../content/{volume}/copy) instead
+	// of PVE's built-in root@pam-only "copy" method, so the migrator can run with
+	// a scoped API token. Requires the pve-csi-copy package on the Proxmox nodes.
+	// Default false preserves the built-in (root@pam) behavior.
+	TokenCopyEndpoint bool
 }
 
 // Request describes one volume migration.
@@ -360,7 +367,7 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 			if err = m.convertAndMove(ctx, cluster, vol, targetVol, req.TargetNode, taskTimeout); err != nil {
 				return fmt.Errorf("failed to migrate disk: %w", err)
 			}
-		} else if err = toolsproxmox.MoveQemuDisk(ctx, cluster, vol, req.TargetNode, targetVol, taskTimeout); err != nil {
+		} else if err = toolsproxmox.MoveQemuDisk(ctx, cluster, vol, req.TargetNode, targetVol, taskTimeout, m.useTokenCopy(vol.Region())); err != nil {
 			// Best effort: remove the partial target file a failed move may
 			// have left behind so retries (and operators) start clean.
 			if onTarget, size, derr := toolsproxmox.DiskOnNode(ctx, cluster, targetVol, req.TargetNode); derr == nil && onTarget && size < expectedSize {
@@ -409,6 +416,16 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 // VM ID, and Proxmox only ever frees volumes OWNED by a VM being destroyed —
 // so destroying the helper (cleanup, crash recovery, any failure path) can
 // only free the helper's own disposable conversion copy, never the original.
+// useTokenCopy resolves the effective token-copy-endpoint setting for a region: the
+// per-cluster config override if set, else the global default (TokenCopyEndpoint).
+func (m *Migrator) useTokenCopy(region string) bool {
+	if m.PClient == nil {
+		return m.TokenCopyEndpoint
+	}
+
+	return m.PClient.TokenCopyEndpoint(region, m.TokenCopyEndpoint)
+}
+
 func (m *Migrator) convertAndMove(ctx context.Context, cluster *goproxmox.APIClient, vol, targetVol *volume.Volume, targetNode string, taskTimeout int) error {
 	vmid := m.HelperVMID
 	if vmid <= 0 {
@@ -474,7 +491,7 @@ func (m *Migrator) convertAndMove(ctx context.Context, cluster *goproxmox.APICli
 
 	m.logf("moving converted disk %s to proxmox node %s (as %s)", rawVol.Disk(), targetNode, targetVol.VolID())
 
-	return toolsproxmox.MoveQemuDisk(ctx, cluster, rawVol, targetNode, targetVol, taskTimeout)
+	return toolsproxmox.MoveQemuDisk(ctx, cluster, rawVol, targetNode, targetVol, taskTimeout, m.useTokenCopy(vol.Region()))
 }
 
 // waitPodsGone polls until no pods use the PVC, bounded by req.DrainTimeout (zero = unbounded).

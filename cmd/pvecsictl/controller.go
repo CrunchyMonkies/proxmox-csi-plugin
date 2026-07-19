@@ -93,14 +93,15 @@ func setControllerCmdFlags(cmd *cobra.Command) {
 func (c *controllerCmd) runController(cmd *cobra.Command, _ []string) error {
 	flags := cmd.Flags()
 
-	leaderElection, _ := flags.GetBool("leader-election")   //nolint: errcheck
-	podFollow, _ := flags.GetBool("pod-follow")             //nolint: errcheck
-	maxAttempts, _ := flags.GetInt("max-attempts")          //nolint: errcheck
-	helperVMID, _ := flags.GetInt("helper-vmid")            //nolint: errcheck
-	taskTimeout, _ := flags.GetInt("timeout")               //nolint: errcheck
-	drainTimeout, _ := flags.GetDuration("drain-timeout")   //nolint: errcheck
-	detachTimeout, _ := flags.GetDuration("detach-timeout") //nolint: errcheck
-	metricsAddress, _ := flags.GetString("metrics-address") //nolint: errcheck
+	leaderElection, _ := flags.GetBool("leader-election")        //nolint: errcheck
+	podFollow, _ := flags.GetBool("pod-follow")                  //nolint: errcheck
+	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
+	maxAttempts, _ := flags.GetInt("max-attempts")               //nolint: errcheck
+	helperVMID, _ := flags.GetInt("helper-vmid")                 //nolint: errcheck
+	taskTimeout, _ := flags.GetInt("timeout")                    //nolint: errcheck
+	drainTimeout, _ := flags.GetDuration("drain-timeout")        //nolint: errcheck
+	detachTimeout, _ := flags.GetDuration("detach-timeout")      //nolint: errcheck
+	metricsAddress, _ := flags.GetString("metrics-address")      //nolint: errcheck
 
 	ctx := cmd.Context()
 
@@ -123,11 +124,12 @@ func (c *controllerCmd) runController(cmd *cobra.Command, _ []string) error {
 	recorder := broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "proxmox-csi-migrator"})
 
 	m := &migrator.Migrator{
-		KClient:    c.kclient,
-		PClient:    c.pclient,
-		Recorder:   recorder,
-		Logger:     logger,
-		HelperVMID: helperVMID,
+		KClient:           c.kclient,
+		PClient:           c.pclient,
+		Recorder:          recorder,
+		Logger:            logger,
+		HelperVMID:        helperVMID,
+		TokenCopyEndpoint: tokenCopyEndpoint,
 	}
 
 	controller := migrationcontroller.New(c.kclient, m, recorder, migrationcontroller.Options{
@@ -208,11 +210,12 @@ func (c *controllerCmd) controllerValidate(cmd *cobra.Command, _ []string) error
 
 	c.primaryStorage = map[string]map[string]string{}
 
-	for _, cl := range cfg.Clusters {
-		if cl.Username == "" || cl.Password == "" {
-			return fmt.Errorf("this command requires Proxmox root account, please provide username and password in config file (cluster=%s)", cl.Region)
-		}
+	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
+	if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint); err != nil {
+		return err
+	}
 
+	for _, cl := range cfg.Clusters {
 		if len(cl.PrimaryStorage) > 0 {
 			c.primaryStorage[cl.Region] = cl.PrimaryStorage
 		}
