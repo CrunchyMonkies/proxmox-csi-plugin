@@ -54,6 +54,8 @@ func (m *Migrator) replacePVTopology(
 	newPVC := pvc.DeepCopy()
 	newPVC.ObjectMeta.UID = ""
 	newPVC.ObjectMeta.ResourceVersion = ""
+	newPVC.ObjectMeta.DeletionTimestamp = nil
+	newPVC.ObjectMeta.DeletionGracePeriodSeconds = nil
 
 	for _, a := range migrationAnnotations {
 		delete(newPVC.ObjectMeta.Annotations, a)
@@ -67,6 +69,8 @@ func (m *Migrator) replacePVTopology(
 	newPV := pv.DeepCopy()
 	newPV.ObjectMeta.UID = ""
 	newPV.ObjectMeta.ResourceVersion = ""
+	newPV.ObjectMeta.DeletionTimestamp = nil
+	newPV.ObjectMeta.DeletionGracePeriodSeconds = nil
 
 	for _, a := range migrationAnnotations {
 		delete(newPV.ObjectMeta.Annotations, a)
