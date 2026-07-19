@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/jarcoal/httpmock"
+	"github.com/luthermonson/go-proxmox"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -136,6 +137,17 @@ func newNode() *corev1.Node {
 			ProviderID: "proxmox://" + testRegion + "/100",
 		},
 	}
+}
+
+// newForeignNode returns the node as registered by a non-Proxmox CCM (e.g.
+// RKE2): foreign providerID, no instance-id annotation, but a SMBIOS system
+// UUID reported by the kubelet.
+func newForeignNode(systemUUID string) *corev1.Node {
+	node := newNode()
+	node.Spec.ProviderID = "rke2://cluster-1-node-1"
+	node.Status.NodeInfo.SystemUUID = systemUUID
+
+	return node
 }
 
 func newCSINode() *storagev1.CSINode {
@@ -490,6 +502,217 @@ func TestMigrateForceUncordonsOnFailure(t *testing.T) {
 	node, err := kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node-1", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.False(t, node.Spec.Unschedulable, "node must not stay cordoned")
+}
+
+func TestMigrateForceForeignProviderIDFallsBackToVMLookup(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The node was registered without the Proxmox CCM: foreign providerID and
+	// no instance-id annotation. The migrator must resolve the VMID with the
+	// same name+UUID VM lookup the CSI controller uses — automatically, with
+	// no extra configuration — and complete the migration (previously it
+	// errored out and required annotating the node).
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newForeignNode("11833f4c-341f-4bd3-aad7-f7abed000000"), newCSINode(), newPod())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+		Force:      true,
+	})
+	require.NoError(t, err)
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
+}
+
+func TestMigrateForceForeignProviderIDNoVMMatch(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	registerTargetContent("pve-2", "local-lvm")
+
+	// The node's SMBIOS UUID matches no Proxmox VM: both the name-based and
+	// the UUID-only lookup come up empty, and the migration must fail loudly
+	// before any drain or move instead of guessing a VMID.
+	kclient := fake.NewClientset(newPVC(nil), newPV("vm-9999-pvc-exist", nil), newForeignNode("00000000-0000-0000-0000-000000000000"), newCSINode(), newPod())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+		Force:      true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve Proxmox VMID")
+	assert.Contains(t, err.Error(), "no VM matches the node name or system UUID")
+
+	// The VMID is resolved before the force-drain path: nothing was cordoned.
+	node, err := kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, node.Spec.Unschedulable)
+}
+
+func TestMigrateForceForeignProviderIDFallsBackToUUIDLookup(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The kubernetes node name shares no prefix with any Proxmox VM name, so
+	// the name-based lookup finds nothing. The system-UUID-only lookup must
+	// still resolve the VM (VM 100 reports the node's SMBIOS UUID) without
+	// requiring the instance-id annotation.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	node := newForeignNode("11833f4c-341f-4bd3-aad7-f7abed000000")
+	node.Name = "k8s-worker-a"
+
+	csiNode := newCSINode()
+	csiNode.Name = "k8s-worker-a"
+	csiNode.Spec.Drivers[0].NodeID = "k8s-worker-a/100"
+
+	pod := newPod()
+	pod.Spec.NodeName = "k8s-worker-a"
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), node, csiNode, pod)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+		Force:      true,
+	})
+	require.NoError(t, err)
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
+}
+
+func TestMigrateForceForeignProviderIDNoSystemUUID(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	registerTargetContent("pve-2", "local-lvm")
+
+	// Foreign providerID, no annotation, and the node reports no SMBIOS
+	// system UUID: there is nothing to verify a VM lookup against, so the
+	// migration must fail (pointing at the annotation) without guessing.
+	kclient := fake.NewClientset(newPVC(nil), newPV("vm-9999-pvc-exist", nil), newForeignNode(""), newCSINode(), newPod())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+		Force:      true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to resolve Proxmox VMID")
+	assert.Contains(t, err.Error(), "reports no system UUID")
+
+	node, err := kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, node.Spec.Unschedulable)
+}
+
+func TestMigrateForceVMFoundInOtherRegionRejected(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	registerTargetContent("pve-2", "local-lvm")
+
+	// The volume's own cluster (cluster-1, 127.0.0.1) has no VM matching the
+	// node: an exact-URL responder (beats the shared catch-alls) serves only
+	// the storage entries the pre-flight needs. The VM lookup then finds the
+	// node's VM in cluster-2 (127.0.0.2, still served by the catch-alls) —
+	// that VMID would alias an unrelated VM in the volume's cluster during
+	// the detach wait, so the migration must be rejected before any cordon.
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/cluster/resources",
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": proxmox.ClusterResources{
+				&proxmox.ClusterResource{ID: "storage/lvm", Type: "storage", PluginType: "lvm", Node: "pve-1", Storage: "local-lvm", Content: "images", Status: "available"},
+				&proxmox.ClusterResource{ID: "storage/lvm", Type: "storage", PluginType: "lvm", Node: "pve-2", Storage: "local-lvm", Content: "images", Status: "available"},
+			},
+		}))
+
+	pool, err := pxpool.NewProxmoxPool([]*pxpool.ProxmoxCluster{
+		{URL: "https://127.0.0.1:8006/api2/json", TokenID: "user!token-id", TokenSecret: "secret", Region: testRegion},
+		{URL: "https://127.0.0.2:8006/api2/json", TokenID: "user!token-id", TokenSecret: "secret", Region: "cluster-2"},
+	})
+	require.NoError(t, err)
+
+	kclient := fake.NewClientset(newPVC(nil), newPV("vm-9999-pvc-exist", nil), newForeignNode("11833f4c-341f-4bd3-aad7-f7abed000000"), newCSINode(), newPod())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: pool}
+
+	err = m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+		Force:      true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "in region cluster-2, but the volume is in region cluster-1")
+
+	node, err := kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, node.Spec.Unschedulable)
+}
+
+func TestMigrateForceProviderIDRegionMismatch(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	registerTargetContent("pve-2", "local-lvm")
+
+	// A proxmox:// providerID whose region differs from the volume's would
+	// hand the detach wait a VMID that aliases an unrelated VM in the
+	// volume's cluster: the migration must be rejected before any cordon,
+	// mirroring the region guard on the VM-lookup path.
+	node := newNode()
+	node.Spec.ProviderID = "proxmox://cluster-2/100"
+
+	kclient := fake.NewClientset(newPVC(nil), newPV("vm-9999-pvc-exist", nil), node, newCSINode(), newPod())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+		Force:      true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "providerID places Proxmox VMID 100 in region cluster-2, but the volume is in region cluster-1")
+
+	got, err := kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.False(t, got.Spec.Unschedulable)
 }
 
 func TestMigrateResumePartialDiskRedoesMove(t *testing.T) {

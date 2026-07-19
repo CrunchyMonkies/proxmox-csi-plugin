@@ -34,6 +34,7 @@ import (
 	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
 	tools "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/kubernetes"
 	toolsproxmox "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/proxmox"
+	provider "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/provider"
 	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
 
 	corev1 "k8s.io/api/core/v1"
@@ -283,8 +284,44 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 		}
 
 		vmID, nodeErr = csi.ProxmoxVMIDbyNode(kubeNode)
-		if nodeErr != nil {
-			return fmt.Errorf("failed to resolve Proxmox VMID from node %s: %v", vmName, nodeErr)
+		if nodeErr == nil {
+			// The detach wait queries the volume's cluster, where a VMID from
+			// another Proxmox cluster would alias an unrelated VM. The
+			// instance-id annotation carries no region and is trusted as-is.
+			if _, pidRegion, pidErr := provider.ParseProviderID(kubeNode.Spec.ProviderID); pidErr == nil && pidRegion != vol.Region() {
+				return fmt.Errorf("node %s providerID places Proxmox VMID %d in region %s, but the volume is in region %s", vmName, vmID, pidRegion, vol.Region())
+			}
+		} else {
+			// No proxmox:// providerID (no Proxmox CCM) and no instance-id
+			// annotation: resolve the VM from the Proxmox API like the CSI
+			// controller does (FindVMByNode: node-name prefix match verified
+			// against the node's SMBIOS system UUID), then by system UUID
+			// alone for VMs whose name does not start with the node name.
+			// Both lookups verify the UUID, so a node that reports none can
+			// only be resolved via the annotation.
+			m.logf("no proxmox providerID or %s annotation on node %s, falling back to Proxmox VM lookup", csi.AnnotationProxmoxInstanceID, vmName)
+
+			uuid := kubeNode.Status.NodeInfo.SystemUUID
+			if uuid == "" {
+				return fmt.Errorf("failed to resolve Proxmox VMID from node %s: %v (the node reports no system UUID to verify a VM lookup against; set the %s annotation)",
+					vmName, nodeErr, csi.AnnotationProxmoxInstanceID)
+			}
+
+			var vmRegion string
+
+			vmID, vmRegion, nodeErr = m.PClient.FindVMByNode(ctx, kubeNode)
+			if nodeErr != nil {
+				vmID, vmRegion, nodeErr = m.PClient.FindVMByUUID(ctx, uuid)
+				if nodeErr != nil {
+					return fmt.Errorf("failed to resolve Proxmox VMID from node %s: %v (no VM matches the node name or system UUID %s)", vmName, nodeErr, uuid)
+				}
+			}
+
+			// The detach wait queries the volume's cluster, so a VM found in a
+			// different Proxmox cluster would alias an unrelated VMID there.
+			if vmRegion != vol.Region() {
+				return fmt.Errorf("node %s resolved to Proxmox VMID %d in region %s, but the volume is in region %s", vmName, vmID, vmRegion, vol.Region())
+			}
 		}
 
 		m.logf("resolved kubernetes node %s to Proxmox VMID %d", vmName, vmID)
