@@ -5,6 +5,31 @@
 
 * enable support for capmox ([6145c7d](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/6145c7d91cfc47c131ac453e2a90a915e5694b2b))
 
+## [0.19.1](https://github.com/sergelogvinov/proxmox-csi-plugin/compare/v0.19.0...v0.19.1) (2026-06-25)
+
+
+### Bug Fixes
+
+* goreleaser cosign signing ([57e9907](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/57e9907502ac9da137f97adda18bb0f11a5bc381))
+* handle shared volumes ([ba9306c](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/ba9306c866d93f6f811d943a1acee3b5ad3cf848))
+* pvc migration ([51cf245](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/51cf245ab7e824e3c536e7d71b90659f0b4e7da7))
+
+## [0.19.0](https://github.com/sergelogvinov/proxmox-csi-plugin/compare/v0.18.1...v0.19.0) (2026-06-19)
+
+
+### Features
+
+* **chart:** add option to set volumeBindingMode of storageclass ([b3f55c4](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/b3f55c4333096bdd190a7f1d9413977c256356cb))
+* configurable controller VMID ([85d2949](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/85d29491d74855450c56fde53122cb04de1c5c94))
+
+
+### Bug Fixes
+
+* bump deps ([099f2d7](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/099f2d7a20700f76a2145c3eeb84471289a06670))
+* cluster config credentials ([2a2ba33](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/2a2ba331a62082238096639abbfb602ef025a362))
+* reset vol.Node() in checkVolume for shared storage ([1715244](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/1715244c7c6282843cf749829df0bda413b51991))
+* resolve VMID from node providerID instead of VM name ([6963566](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/6963566e827cbc6950d8b90e44e375df704dfc26))
+
 ## [0.18.1](https://github.com/sergelogvinov/proxmox-csi-plugin/compare/v0.18.0...v0.18.1) (2026-04-04)
 
 

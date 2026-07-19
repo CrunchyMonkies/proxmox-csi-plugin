@@ -155,6 +155,14 @@ func PVsInZone(ctx context.Context, clientset clientkubernetes.Interface, driver
 
 // PVWaitDelete waits for the specified PersistentVolume to be deleted.
 func PVWaitDelete(ctx context.Context, clientset clientkubernetes.Interface, pvName string) error {
+	// We reuse PV name for change nodeSelector, but some controllers may modify PV on deletion event.
+	// So we need to wait after PV deletion before creating new PV with the same name.
+	select {
+	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	if _, err := clientset.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{}); err != nil {
 		if errors.IsNotFound(err) {
 			return nil
