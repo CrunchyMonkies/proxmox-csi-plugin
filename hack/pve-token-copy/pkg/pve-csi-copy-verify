@@ -1,38 +1,66 @@
 #!/bin/sh
 # Canonical verification for pve-csi-copy. Exit 0 iff pvedaemon AND pveproxy are
-# active AND the csi_copy_volume endpoint is registered AND routable.
+# active AND each running daemon has actually LOADED the csi_copy_volume endpoint
+# since its current start AND the route resolves.
 #
-# Routability matters: registration alone is not enough. The 0.1.x endpoint was
-# registered under content/ ('{volume}/copy'), where the router's greedy {volume}
-# parameter (fragmentDelimiter => '') swallowed the whole suffix, so the method
-# existed but no HTTP request could ever reach it. The check below resolves the
-# route the same way the HTTP server does (find_handler), which would have
-# caught that bug.
+# PRIMARY gate = the LIVE running daemon. An earlier revision only ran a private,
+# non-taint perl with PERL5LIB set and checked find_handler in THAT process — it
+# passed even though the endpoint never loaded in the real daemons. pvedaemon and
+# pveproxy run `#!/usr/bin/perl -T` (taint mode), which IGNORES PERL5LIB/PERL5OPT,
+# so the old env-var loader was inert and csi_copy_volume was never registered in
+# the running API. The module now lives in /usr/share/perl5 and is loaded via a
+# command-line `-MPVECSICopy` in each daemon's ExecStart; on success it logs
+# "pve-csi-copy: csi_copy_volume registered" to the journal. We assert that log is
+# present for each daemon since its current start — the check that would have
+# caught the taint-mode bug.
+#
+# SECONDARY (structural, NOT the sole gate): the module compiles and find_handler
+# resolves POST .../csi-copy to csi_copy_volume in a fresh perl. This still guards
+# the 0.1.x greedy-{volume} routing regression, but the live-daemon gate above is
+# authoritative.
 #
 # Dual-use: source it to get the pve_csi_copy_verify function (install.sh does), or
 # run it directly (the .deb ships it as /usr/sbin/pve-csi-copy-verify, and Ansible
 # can call it as a check/handler).
-
-MODDIR=/usr/lib/pve-csi-copy/perl
 
 pve_csi_copy_verify() {
     # The running daemons must be up (a failed module load would surface here).
     systemctl is-active --quiet pvedaemon || { echo "pvedaemon is not active" >&2; return 1; }
     systemctl is-active --quiet pveproxy  || { echo "pveproxy is not active" >&2; return 1; }
 
-    # If either daemon took the module's fail-safe path, the endpoint is NOT live.
-    if journalctl -u pvedaemon -u pveproxy --since "-3 min" 2>/dev/null \
-        | grep -q "PVECSICopy: endpoint NOT registered"; then
-        echo "module loaded but registration failed (see: journalctl -u pvedaemon -u pveproxy) — endpoint not live" >&2
-        return 1
-    fi
+    # PRIMARY: each running daemon must have logged a successful registration since
+    # it last started. Correlate against ExecMainStartTimestamp (format e.g.
+    # "Wed 2026-07-22 01:31:11 AEST"), which journalctl --since accepts verbatim.
+    # A daemon that is up but carries NO registration log since its current start
+    # means the endpoint did not load in it (taint mode / loader issue).
+    for _unit in pvedaemon pveproxy; do
+        _since=$(systemctl show -p ExecMainStartTimestamp --value "$_unit" 2>/dev/null)
+        if [ -z "$_since" ]; then
+            echo "cannot determine $_unit start time (ExecMainStartTimestamp empty)" >&2
+            return 1
+        fi
+        if ! journalctl -u "$_unit" --since "$_since" 2>/dev/null \
+            | grep -q "pve-csi-copy: csi_copy_volume registered"; then
+            echo "endpoint not loaded in running $_unit — taint mode / loader issue (no registration log since '$_since')" >&2
+            return 1
+        fi
+        # If the daemon loaded the module but registration threw, it took the
+        # fail-safe path and the endpoint is NOT live.
+        if journalctl -u "$_unit" --since "$_since" 2>/dev/null \
+            | grep -q "PVECSICopy: endpoint NOT registered"; then
+            echo "$_unit loaded the module but registration failed (see: journalctl -u $_unit) — endpoint not live" >&2
+            return 1
+        fi
+    done
 
-    # Secondary: the method must be registered AND the route must resolve the way
-    # the HTTP server resolves it. find_handler walks the same regex/folder path
-    # lookup pveproxy uses, so it fails if 'csi-copy' would be swallowed by a
-    # greedy param sibling (the 0.1.x content/{volume}/copy bug). Defensive: if
-    # find_handler is ever unavailable, fall back to registration-only + warning.
-    PERL5LIB="$MODDIR" perl -MPVECSICopy::Impl -e '
+    # SECONDARY: the method must register AND the route must resolve the way the
+    # HTTP server resolves it. find_handler walks the same regex/folder path lookup
+    # pveproxy uses, so it fails if 'csi-copy' would be swallowed by a greedy param
+    # sibling (the 0.1.x content/{volume}/copy bug). The module now lives in a
+    # default @INC dir, so no PERL5LIB is needed. Defensive: if find_handler is ever
+    # unavailable, fall back to registration-only + warning. This is a secondary
+    # assertion — the live-daemon gate above is the real pass/fail.
+    perl -MPVECSICopy::Impl -e '
         PVECSICopy::Impl::register();
         require PVE::API2::Storage::Status;
         die "not registered\n"
@@ -57,9 +85,9 @@ pve_csi_copy_verify() {
         die "csi-copy routed to \x27$method_info->{name}\x27, not csi_copy_volume — "
             . "swallowed by a param sibling?\n"
             if $method_info->{name} ne "csi_copy_volume";
-    ' >/dev/null || { echo "endpoint failed to register or route (module-level check)" >&2; return 1; }
+    ' >/dev/null || { echo "structural check failed: endpoint did not register or route in a fresh perl" >&2; return 1; }
 
-    echo "verify: ok — pvedaemon/pveproxy active, csi_copy_volume registered and routable"
+    echo "verify: ok — pvedaemon/pveproxy active, csi_copy_volume registered in the live daemons and routable"
     return 0
 }
 

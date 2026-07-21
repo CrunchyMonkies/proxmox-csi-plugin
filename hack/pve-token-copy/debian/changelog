@@ -1,3 +1,41 @@
+pve-csi-copy (0.3.0) unstable; urgency=medium
+
+  * Fix endpoint that never loaded: pvedaemon/pveproxy run `perl -T` (taint
+    mode), which IGNORES both PERL5LIB and PERL5OPT. The 0.1.x/0.2.0 loader set
+    exactly those via systemd Environment=, so it was inert — csi_copy_volume
+    was never registered in the running daemons (an authenticated POST returned
+    "Method ... not implemented"). The old verify passed regardless because it
+    checked its OWN non-taint perl, never the live daemon.
+  * Move the Perl module into a default @INC dir: /usr/share/perl5/PVECSICopy.pm
+    and /usr/share/perl5/PVECSICopy/Impl.pm (was /usr/lib/pve-csi-copy/perl),
+    loaded via a command-line `-MPVECSICopy` — the only mechanism taint mode
+    honours.
+  * Load it through a wrapper (/usr/lib/pve-csi-copy/pve-csi-copy-exec) called
+    from each daemon's systemd ExecStart override, instead of a hardcoded perl
+    command line. The wrapper reads the base unit's real ExecStart at start time
+    and injects only `-MPVECSICopy`, so it survives a future PVE changing the
+    daemon invocation, args, or perl flags — only a fundamental pve-manager
+    restructure could affect it, and the live-daemon verify catches that loudly.
+    It is deliberately fail-safe: on any problem (module hidden, shebang not
+    perl, base command unreadable) it execs the daemon unmodified — a missing
+    endpoint is acceptable, a dead pvedaemon/pveproxy is not.
+  * Override ExecReload to a full `systemctl restart`: PVE's graceful reload is
+    an in-process exec() that drops the command-line `-M`, so a plain reload
+    would silently unload the endpoint. Converting the reload into a restart
+    re-runs ExecStart (reloading the module) with no drop and no deadlock, and
+    covers the pve-manager upgrade path (`deb-systemd-invoke
+    reload-or-try-restart`). The fix is fully event-driven — no polling timer.
+  * On successful registration the module now logs
+    "pve-csi-copy: csi_copy_volume registered" to syslog, but only inside the
+    daemons (guarded on $0), giving the verify a live signal.
+  * pve-csi-copy-verify now gates on the LIVE running daemon: it requires a
+    registration log for each of pvedaemon/pveproxy since its current start
+    (correlated via ExecMainStartTimestamp), and keeps the module-compile /
+    find_handler route check as a secondary structural assertion.
+  * Handler logic, permissions, and volume/target validation are unchanged.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Wed, 22 Jul 2026 12:00:00 +0000
+
 pve-csi-copy (0.2.0) unstable; urgency=medium
 
   * Fix unreachable endpoint: move the copy method from

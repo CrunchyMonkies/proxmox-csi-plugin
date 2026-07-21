@@ -1,0 +1,24 @@
+#!/bin/sh
+# pve-csi-copy-exec: start a PVE daemon with PVECSICopy injected, reading the
+# real command from the base unit so it survives PVE changing the invocation.
+# FAIL-SAFE: on ANY problem, exec the daemon unmodified — a missing endpoint is
+# acceptable; a dead pvedaemon/pveproxy is not.
+set -u
+svc="${1:?service name required}"
+bare() { exec "/usr/bin/${svc}" start; exit 1; }
+
+base_unit=$(systemctl show -p FragmentPath --value "${svc}.service" 2>/dev/null)
+[ -n "$base_unit" ] && [ -r "$base_unit" ] || bare
+cmd=$(sed -n 's/^ExecStart=//p' "$base_unit" 2>/dev/null | sed 's/^[-+!@:]*//' | grep -v '^[[:space:]]*$' | head -1)
+[ -n "$cmd" ] || bare
+# shellcheck disable=SC2086
+set -- $cmd
+script="$1"; shift
+[ -n "$script" ] && [ -x "$script" ] || bare
+shebang=$(head -1 "$script" 2>/dev/null)
+case "$shebang" in '#!'*perl*) : ;; *) exec "$script" "$@" ;; esac
+interp=$(printf '%s\n' "$shebang" | sed 's/^#!//' | awk '{print $1}')
+flags=$(printf '%s\n' "$shebang" | sed 's/^#![^ ]*//')
+[ -x "$interp" ] || bare
+"$interp" $flags -e 'require PVECSICopy;' 2>/dev/null || exec "$script" "$@"
+exec "$interp" $flags -MPVECSICopy "$script" "$@"

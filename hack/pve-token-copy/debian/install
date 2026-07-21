@@ -1,5 +1,6 @@
-perl/PVECSICopy.pm usr/lib/pve-csi-copy/perl
-perl/PVECSICopy/Impl.pm usr/lib/pve-csi-copy/perl/PVECSICopy
+perl/PVECSICopy.pm usr/share/perl5
+perl/PVECSICopy/Impl.pm usr/share/perl5/PVECSICopy
+pve-csi-copy-exec usr/lib/pve-csi-copy
 pkg/pve-csi-copy-verify usr/sbin
 systemd/pvedaemon.service.d/10-pve-csi-copy.conf usr/share/pve-csi-copy/systemd/pvedaemon.service.d
 systemd/pveproxy.service.d/10-pve-csi-copy.conf usr/share/pve-csi-copy/systemd/pveproxy.service.d

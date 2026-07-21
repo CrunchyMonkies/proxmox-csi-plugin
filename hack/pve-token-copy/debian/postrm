@@ -5,6 +5,11 @@ set -e
 
 case "$1" in
     remove|purge)
+        # The daemon-start wrapper is a dpkg-managed file, so dpkg removes it; this
+        # is belt-and-suspenders (no-op if already gone) plus pruning the now-empty
+        # /usr/lib/pve-csi-copy dir it lived in.
+        rm -f /usr/lib/pve-csi-copy/pve-csi-copy-exec
+        rmdir /usr/lib/pve-csi-copy 2>/dev/null || true
         systemctl daemon-reload || true
         ;;
 esac

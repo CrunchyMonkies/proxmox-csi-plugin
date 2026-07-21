@@ -14,7 +14,8 @@ case "$1" in
         install -D -m 0644 "$SRC/pveproxy.service.d/10-pve-csi-copy.conf"  "$DPP"
 
         systemctl daemon-reload || true
-        # Env changes need a restart (reload does not re-read Environment=).
+        # ExecStart changes need a full restart to take effect (a graceful reload
+        # would re-exec the old command line).
         systemctl restart pvedaemon pveproxy
 
         # Hard requirement: the daemons must come back up.

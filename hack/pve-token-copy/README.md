@@ -15,13 +15,38 @@ which needs a real owning VM — CSI volumes are parked on a placeholder VMID).
 This adds a **sibling** method with a proper permission gate, so a scoped token can do it.
 
 ## How it works (no Proxmox files modified)
-- A self-contained Perl module tree is installed under `/usr/lib/pve-csi-copy/perl/`
-  — a path we own, not a Proxmox one:
+- A self-contained Perl module tree is installed into `/usr/share/perl5/`
+  (`PVECSICopy.pm` + `PVECSICopy/Impl.pm`) — a **default `@INC` directory**, which
+  matters for the loader below:
   - `PVECSICopy.pm` — a **byte-trivial, always-compiles loader**. It does nothing but
     `eval { require PVECSICopy::Impl; PVECSICopy::Impl::register(); }`.
   - `PVECSICopy/Impl.pm` — all the real logic (the method + its handler).
-- Two systemd drop-ins (`/etc/systemd/system/{pvedaemon,pveproxy}.service.d/`) set
-  `PERL5LIB` + `PERL5OPT=-MPVECSICopy`, so both daemons load the loader at startup.
+- **Loading it under taint mode.** `pvedaemon` and `pveproxy` run
+  `#!/usr/bin/perl -T` (taint mode), and taint mode makes perl **ignore `PERL5LIB`
+  and `PERL5OPT`**. So an env-var loader is inert — the endpoint would never
+  register (this was the bug in ≤0.2.0). The command-line `-MPVECSICopy` is the one
+  mechanism taint mode honours, and it only resolves because the module is in a
+  default `@INC` dir.
+- **A wrapper, not a hardcoded `ExecStart`.** Two systemd drop-ins
+  (`/etc/systemd/system/{pvedaemon,pveproxy}.service.d/`) override each daemon's
+  **`ExecStart`** to `/usr/lib/pve-csi-copy/pve-csi-copy-exec <svc>`. Rather than
+  pinning the daemon's exact command line (which would go stale if a future PVE
+  changes the invocation, args, or perl flags), the wrapper **reads the base unit's
+  real `ExecStart` at start time** (`systemctl show -p FragmentPath`), parses the
+  script's shebang, and re-execs it with `-MPVECSICopy` inserted after the existing
+  perl flags. It is deliberately **fail-safe**: if anything is unexpected — the base
+  command can't be read, the script's shebang isn't perl, or a probe load of
+  `PVECSICopy` fails — it `exec`s the daemon **unmodified**. A missing endpoint is
+  acceptable; a dead `pvedaemon`/`pveproxy` (the node's management API) is not. Only
+  a fundamental pve-manager restructure could defeat it, and the live-daemon verify
+  would catch that loudly.
+- **Surviving reloads.** The same drop-ins override **`ExecReload`** to
+  `-/bin/systemctl --no-block restart <svc>.service`: PVE's graceful reload is an
+  in-process `exec()` that drops the command-line `-M`, so a plain `systemctl
+  reload` (and the `deb-systemd-invoke reload-or-try-restart` that pve-manager
+  upgrades run) would silently unload the endpoint — converting the reload into a
+  full restart re-runs the wrapper and re-loads the module with no drop and no
+  deadlock. The whole mechanism is **event-driven; no polling timer is needed**.
 - On load, `Impl::register()` calls `PVE::API2::Storage::Status->register_method(...)`,
   adding `POST .../storage/{storage}/csi-copy` to the live API tree (idempotently).
   It registers at the **storage level, not under `content/`**: the content subtree is
@@ -88,7 +113,7 @@ place the loader drop-ins, restart `pvedaemon`/`pveproxy`, and verify registrati
 For a fleet, install it with **Ansible** — see [`ANSIBLE.md`](ANSIBLE.md).
 
 ```bash
-apt install ./pve-csi-copy_0.2.0_all.deb      # or: dpkg -i …
+apt install ./pve-csi-copy_0.3.0_all.deb      # or: dpkg -i …
 pve-csi-copy-verify                            # ships in the package
 ```
 
@@ -136,22 +161,36 @@ credential in the cluster. See [migration-controller.md](../../docs/migration-co
   target `Datastore.AllocateSpace` checks, and scope the token's ACL tightly. Confirm
   on your PVE version that `check_volume_access`'s signature/behaviour matches — it is
   the control that prevents cross-tenant volume reads.
-- **`$PERL5LIB` is in a root daemon's `@INC`.** `/usr/lib/pve-csi-copy/perl` is
-  root-owned `0755` / files `0644`, and `install.sh` refuses to proceed if anything
-  there is non-root-owned or group/world-writable — because a writable entry would be
-  unauthenticated root code-exec in pvedaemon. If you ever repackage this (`.deb`,
-  DaemonSet bind-mount), preserve those perms and don't source the tree from anywhere
-  less trusted than root.
+- **The module (and wrapper) are run by a root daemon.**
+  `/usr/share/perl5/PVECSICopy.pm` and `/usr/share/perl5/PVECSICopy/Impl.pm` are
+  root-owned `0644` (dir `0755`), and the daemon-start wrapper
+  `/usr/lib/pve-csi-copy/pve-csi-copy-exec` is root-owned `0755` — systemd `ExecStart`
+  runs it as root. `install.sh` refuses to proceed if the module or the wrapper is
+  non-root-owned or group/world-writable, because a writable entry would be
+  unauthenticated root code-exec in pvedaemon. The install/remove logic touches only
+  our own files, never the shared `/usr/share/perl5` tree. If you ever repackage this
+  (`.deb`, DaemonSet bind-mount), preserve those perms and don't source the tree from
+  anywhere less trusted than root.
 - **Same-node copy + `storage_migrate`.** The built-in `copy` code notes an
   ssh-to-localhost issue for local targets; the worker sshes as root to `target_node`
   (bounded to a valid cluster node, not an arbitrary host). Confirm same-node copies
   work on your PVE version, or special-case local (skip ssh) in the worker.
-- **`PERL5OPT` inheritance.** The env var is inherited by any child `perl` the daemons
-  fork. The loader is trivial and fails safe, so this is low-risk, but it is a wider
-  surface than a single daemon.
+- **Loaded via a wrapper on `ExecStart`, not env vars.** Because the daemons run
+  `perl -T` (taint mode ignores `PERL5LIB`/`PERL5OPT`), the module is pulled in by a
+  command-line `-MPVECSICopy`. Rather than hardcode the daemon command line, the
+  `ExecStart` override calls `pve-csi-copy-exec`, which reads the base unit's real
+  `ExecStart` at start time and injects only `-MPVECSICopy` — so it survives PVE
+  changing the daemon invocation, args, or perl flags, and it `exec`s the daemon
+  unmodified on any anomaly (fail-safe). `ExecReload` is rewritten to a full
+  `systemctl restart` so PVE's module-dropping graceful reload (and pve-manager's
+  `reload-or-try-restart` upgrade path) can't silently unload the endpoint. Unlike a
+  `PERL5OPT` env loader, this is scoped to the two daemons only — it is not inherited
+  by child `perl` processes they fork. The mechanism is event-driven; there is no
+  polling timer to keep the endpoint alive.
 - **Not an official Proxmox extension point.** PVE has no supported API-plugin hook;
-  this is a community mechanism (same class as the widely-used systemd/PERL5OPT hooks),
-  chosen over patching Proxmox files because it fails safe and survives upgrades.
+  this is a community mechanism (a systemd `ExecStart` drop-in whose wrapper adds a
+  command-line `-M` module to the daemons), chosen over patching Proxmox files
+  because it fails safe and survives upgrades.
 
 ## Review
 An adversarial security review (Fable 5) of an earlier revision produced the fixes now

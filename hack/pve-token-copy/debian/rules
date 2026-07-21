@@ -6,3 +6,9 @@
 
 %:
 	dh $@
+
+# dh_fixperms resets files under /usr/lib to 0644; the daemon-start wrapper must be
+# executable (systemd ExecStart runs it directly). Restore its mode after fixperms.
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0755 debian/pve-csi-copy/usr/lib/pve-csi-copy/pve-csi-copy-exec
