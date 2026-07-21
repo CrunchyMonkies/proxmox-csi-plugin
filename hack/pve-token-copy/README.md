@@ -22,8 +22,14 @@ This adds a **sibling** method with a proper permission gate, so a scoped token 
   - `PVECSICopy/Impl.pm` — all the real logic (the method + its handler).
 - Two systemd drop-ins (`/etc/systemd/system/{pvedaemon,pveproxy}.service.d/`) set
   `PERL5LIB` + `PERL5OPT=-MPVECSICopy`, so both daemons load the loader at startup.
-- On load, `Impl::register()` calls `PVE::API2::Storage::Content->register_method(...)`,
-  adding `POST .../content/{volume}/copy` to the live API tree (idempotently).
+- On load, `Impl::register()` calls `PVE::API2::Storage::Status->register_method(...)`,
+  adding `POST .../storage/{storage}/csi-copy` to the live API tree (idempotently).
+  It registers at the **storage level, not under `content/`**: the content subtree is
+  mounted with a fragment-joining, **greedy `{volume}` path parameter** (deliberate,
+  so dir-storage volnames like `9999/vm-9999-disk-0.raw` can contain `/`), which
+  swallows any `content/{volume}/suffix` path — a method registered there exists but
+  is unreachable over HTTP (requests route to the built-in root-only `copy` with
+  `volume="<vol>/copy"`). Do not move it back.
 - **Fail-safe by construction**: the loader is trivial so it always compiles, and it
   wraps *all* implementation work — including the `require` that compiles `Impl.pm` —
   in `eval`. So a compile error, a changed PVE internal, or any `die` in the impl is
@@ -34,11 +40,14 @@ This adds a **sibling** method with a proper permission gate, so a scoped token 
 
 ## The endpoint
 ```
-POST /nodes/{node}/storage/{storage}/content/{volume}/copy
+POST /nodes/{node}/storage/{storage}/csi-copy
+  volume       = "<src-volname>"            # source volume within {storage}
   target       = "<dst-storage>:<dst-volname>"
   target_node  = <node>   # optional, default local
 ```
-Returns a task UPID.
+Returns a task UPID. The source volume is a **body** parameter — do not repeat
+`node` (or `storage`) in the body with a different value; PVE rejects URI/body
+parameter conflicts.
 
 ## Security model
 Auth is PVE's own ACL — not a bespoke allow-list. A copy is a **read of the source**
@@ -79,7 +88,7 @@ place the loader drop-ins, restart `pvedaemon`/`pveproxy`, and verify registrati
 For a fleet, install it with **Ansible** — see [`ANSIBLE.md`](ANSIBLE.md).
 
 ```bash
-apt install ./pve-csi-copy_0.1.0_all.deb      # or: dpkg -i …
+apt install ./pve-csi-copy_0.2.0_all.deb      # or: dpkg -i …
 pve-csi-copy-verify                            # ships in the package
 ```
 

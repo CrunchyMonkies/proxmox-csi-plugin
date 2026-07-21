@@ -138,14 +138,10 @@ func DeleteDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.V
 // MoveQemuDisk moves the volume to the given node, into the storage and disk
 // name carried by targetVol (the API's target parameter accepts a full volume
 // identifier in storage:disk form, allowing cross-storage moves and renames).
+// With tokenEndpoint it posts to the pve-csi-copy package's token-authorized
+// /nodes/{node}/storage/{storage}/csi-copy method instead of the root@pam-only
+// built-in content copy.
 func MoveQemuDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.Volume, node string, targetVol *volume.Volume, taskTimeout int, tokenEndpoint bool) error {
-	params := map[string]interface{}{
-		"node":        vol.Node(),
-		"target":      targetVol.VolID(),
-		"target_node": node,
-		"volume":      vol.Disk(),
-	}
-
 	// Copy a volume to another storage/node.
 	//
 	// By default this uses PVE's built-in content "copy" method:
@@ -153,15 +149,33 @@ func MoveQemuDisk(ctx context.Context, cluster *goproxmox.APIClient, vol *volume
 	// which has no permissions block and is therefore restricted to root@pam
 	// ("experimental code - do not use" upstream).
 	//
-	// When tokenEndpoint is set, it targets the permission-gated sibling added by
-	// hack/pve-token-copy (POST .../content/{volume}/copy). That method takes the
-	// same parameters but is authorized by PVE ACL — Datastore.Audit on the source
-	// and Datastore.AllocateSpace on the target — so a scoped API token performs the
+	// When tokenEndpoint is set, it targets the permission-gated method added by
+	// hack/pve-token-copy (POST .../storage/{storage}/csi-copy, the source volume in
+	// the body). It lives at the storage level — NOT under content/ — because PVE's
+	// router matches the content subtree's {volume} parameter greedily across '/'
+	// (fragmentDelimiter), so a content/{volume}/copy path can never route and falls
+	// through to the root-only built-in with volume='<vol>/copy'. The body carries
+	// ONLY volume/target/target_node: the URI supplies node (and storage), and PVE
+	// rejects a request whose body duplicates a URI parameter with a different
+	// value. The method is authorized by PVE ACL — Datastore.Audit on the source and
+	// Datastore.AllocateSpace on the target — so a scoped API token performs the
 	// copy and no root@pam credential is needed. It must be installed on the Proxmox
-	// nodes (the pve-csi-copy package); see hack/pve-token-copy/README.md.
+	// nodes (the pve-csi-copy package, >= 0.2.0); see hack/pve-token-copy/README.md.
+	params := map[string]interface{}{
+		"node":        vol.Node(),
+		"target":      targetVol.VolID(),
+		"target_node": node,
+		"volume":      vol.Disk(),
+	}
 	path := fmt.Sprintf("/nodes/%s/storage/%s/content/%s", url.PathEscape(vol.Node()), url.PathEscape(vol.Storage()), escapeVolumePath(vol.Disk()))
+
 	if tokenEndpoint {
-		path += "/copy"
+		params = map[string]interface{}{
+			"target":      targetVol.VolID(),
+			"target_node": node,
+			"volume":      vol.Disk(),
+		}
+		path = fmt.Sprintf("/nodes/%s/storage/%s/csi-copy", url.PathEscape(vol.Node()), url.PathEscape(vol.Storage()))
 	}
 
 	var upid proxmox.UPID

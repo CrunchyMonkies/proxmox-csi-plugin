@@ -12,7 +12,7 @@ Drop the tasks below into a role (or a play) that already targets your PVE hosts
 
 ```yaml
 # group_vars/proxmox.yml  (or wherever your PVE hosts are grouped)
-pve_csi_copy_version: "0.1.0"
+pve_csi_copy_version: "0.2.0"
 pve_csi_copy_deb_url: >-
   https://github.com/CrunchyMonkies/proxmox-csi-plugin/releases/download/pve-csi-copy-v{{ pve_csi_copy_version }}/pve-csi-copy_{{ pve_csi_copy_version }}_all.deb
 ```
