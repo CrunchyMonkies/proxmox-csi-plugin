@@ -5,6 +5,22 @@ package PVECSICopy::Impl;
 # `require`) is swallowed and the daemon still starts. Fully-qualified PVE calls
 # only — no `import`, so a changed helper signature can't fail at load.
 #
+# ROUTING: the method is registered on PVE::API2::Storage::Status at
+# '{storage}/csi-copy' (POST /nodes/{node}/storage/{storage}/csi-copy) — NOT on
+# PVE::API2::Storage::Content. Do not move it back under content/: the Content
+# subtree is mounted with fragmentDelimiter => '' and a greedy '{volume}' path
+# parameter (deliberately, so dir-storage volnames like '9999/vm-9999-disk-0.raw'
+# can contain '/'), which makes PVE's router join EVERYTHING after '/content/'
+# into a single {volume} component. A path like 'content/{volume}/copy' therefore
+# never routes to its own method — the request lands on the BUILT-IN root-only
+# 'copy' method with volume='<vol>/copy' (observed live on PVE 9.2.3: a 400
+# "duplicate parameter ... with conflicting values" with a body volume, or
+# "Permission check failed (user != root@pam)" without one). At the Status level
+# all per-storage children are fixed path names ('status', 'rrd', 'content', ...);
+# there is no greedy param sibling, so 'csi-copy' routes. The source volume is a
+# BODY parameter instead. pve-csi-copy-verify asserts routability, not just
+# registration.
+#
 # NOTE: this couples to PVE internals (register_method, parse_volname,
 # check_volume_access, storage_migrate). Re-validate against the exact PVE version
 # on the target node — see README "Caveats". install.sh verify checks it is live.
@@ -22,23 +38,25 @@ sub register {
     require PVE::Storage;
     require PVE::SSHInfo;
     require PVE::INotify;
-    require PVE::API2::Storage::Content;
+    require PVE::API2::Storage::Status;
 
     # Idempotent: if a prior load already registered it, do nothing (avoids a
     # register_method collision die on daemon reload).
-    if (PVE::API2::Storage::Content->can('map_method_by_name')
-        && eval { PVE::API2::Storage::Content->map_method_by_name('copy_volume_token') }) {
+    if (PVE::API2::Storage::Status->can('map_method_by_name')
+        && eval { PVE::API2::Storage::Status->map_method_by_name('csi_copy_volume') }) {
         $REGISTERED = 1;
         return;
     }
 
-    PVE::API2::Storage::Content->register_method({
-        name => 'copy_volume_token',
-        path => '{volume}/copy',
+    PVE::API2::Storage::Status->register_method({
+        name => 'csi_copy_volume',
+        path => '{storage}/csi-copy',
         method => 'POST',
         description => "Copy a volume to another storage (token-authorised sibling of "
-            . "the root-only built-in 'copy'). Source access is enforced per-volume; "
-            . "the target requires Datastore.AllocateSpace.",
+            . "the root-only built-in content 'copy'). Source access is enforced "
+            . "per-volume; the target requires Datastore.AllocateSpace. Lives at the "
+            . "storage level (not under content/) because the content subtree's greedy "
+            . "{volume} parameter shadows any fixed sub-path.",
         protected => 1,      # runs in pvedaemon (as root); the ACL below authorises the token
         proxyto => 'node',
         permissions => {
@@ -54,7 +72,8 @@ sub register {
                 node => PVE::JSONSchema::get_standard_option('pve-node'),
                 storage => PVE::JSONSchema::get_standard_option('pve-storage-id'),
                 volume => {
-                    description => "Source volume name within {storage} (block volname).",
+                    description => "Source volume name within {storage} (block volname). "
+                        . "Body parameter (the URI carries no volume component).",
                     type => 'string',
                     # Explicit allow-list. parse_volume_id only validates the storage-id
                     # prefix (volname is `.+`), so DO NOT rely on it to reject traversal.
@@ -99,6 +118,13 @@ sub register {
 
             # --- target (a WRITE) ------------------------------------------------
             my ($dst_sid, $dst_volname) = PVE::Storage::parse_volume_id($param->{target});
+            # Same allow-list as the source volume above. parse_volume_id only
+            # validates the storage-id prefix (volname is `.+`), so guard the
+            # target volname against ':' (volid-splitting), '/' and '..'
+            # (traversal on directory-backed storage) here rather than relying on
+            # the destination plugin's parse_volname to reject them on import.
+            die "invalid target volume name\n"
+                unless $dst_volname =~ /^[A-Za-z0-9][A-Za-z0-9._\-]*$/ && length($dst_volname) <= 128;
             my $dst_volid = "$dst_sid:$dst_volname";
             $rpcenv->check($authuser, "/storage/$dst_sid", ['Datastore.AllocateSpace']);
 

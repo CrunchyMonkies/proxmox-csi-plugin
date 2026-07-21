@@ -11,7 +11,7 @@ Package: pve-csi-copy
 Architecture: all
 Depends: ${misc:Depends}, pve-manager, perl
 Description: token-authorised copy-volume endpoint for proxmox-csi-plugin
- Registers a permission-gated "POST .../content/{volume}/copy" API method into
+ Registers a permission-gated "POST .../storage/{storage}/csi-copy" API method into
  pvedaemon/pveproxy so the proxmox-csi-plugin migration controller can copy
  volumes between storages with a scoped API token instead of root@pam.
  .

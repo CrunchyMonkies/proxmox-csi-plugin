@@ -1,3 +1,27 @@
+pve-csi-copy (0.2.0) unstable; urgency=medium
+
+  * Fix unreachable endpoint: move the copy method from
+    PVE::API2::Storage::Content ('{volume}/copy') to PVE::API2::Storage::Status
+    ('{storage}/csi-copy'). The content subtree is mounted with a
+    fragment-joining, greedy '{volume}' path parameter, so PVE's router fed the
+    whole 'content/<vol>/copy' suffix to the BUILT-IN root-only 'copy' method as
+    volume='<vol>/copy' — observed on PVE 9.2.3 as a 400 "duplicate parameter
+    (already defined in URI) with conflicting values!" (or a root@pam permission
+    error without a body volume). The endpoint is now
+    POST /nodes/{node}/storage/{storage}/csi-copy with the source volume as a
+    body parameter; handler and permissions are unchanged.
+  * Harden the target volume name: apply the same strict allow-list the source
+    volume already uses (reject ':', '/', '..') instead of relying on the
+    destination plugin's parse_volname to reject traversal on import, so the
+    endpoint's safety no longer depends on a check in a separate code path.
+  * pve-csi-copy-verify now asserts ROUTABILITY (find_handler, the same route
+    resolution pveproxy uses), not just registration — the old check passed
+    while the endpoint was unreachable.
+  * Requires the migration controller / pvecsictl from the matching plugin
+    release: the client now posts to the new URL.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Wed, 22 Jul 2026 00:00:00 +0000
+
 pve-csi-copy (0.1.0) unstable; urgency=medium
 
   * Initial packaging of the token-authorised copy-volume endpoint for the

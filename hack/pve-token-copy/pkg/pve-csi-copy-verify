@@ -1,6 +1,13 @@
 #!/bin/sh
 # Canonical verification for pve-csi-copy. Exit 0 iff pvedaemon AND pveproxy are
-# active AND the copy_volume_token endpoint is registered.
+# active AND the csi_copy_volume endpoint is registered AND routable.
+#
+# Routability matters: registration alone is not enough. The 0.1.x endpoint was
+# registered under content/ ('{volume}/copy'), where the router's greedy {volume}
+# parameter (fragmentDelimiter => '') swallowed the whole suffix, so the method
+# existed but no HTTP request could ever reach it. The check below resolves the
+# route the same way the HTTP server does (find_handler), which would have
+# caught that bug.
 #
 # Dual-use: source it to get the pve_csi_copy_verify function (install.sh does), or
 # run it directly (the .deb ships it as /usr/sbin/pve-csi-copy-verify, and Ansible
@@ -20,14 +27,39 @@ pve_csi_copy_verify() {
         return 1
     fi
 
-    # Secondary: the method resolves via the class (also catches a broken module file).
+    # Secondary: the method must be registered AND the route must resolve the way
+    # the HTTP server resolves it. find_handler walks the same regex/folder path
+    # lookup pveproxy uses, so it fails if 'csi-copy' would be swallowed by a
+    # greedy param sibling (the 0.1.x content/{volume}/copy bug). Defensive: if
+    # find_handler is ever unavailable, fall back to registration-only + warning.
     PERL5LIB="$MODDIR" perl -MPVECSICopy::Impl -e '
         PVECSICopy::Impl::register();
-        require PVE::API2::Storage::Content;
-        die "not registered\n" unless PVE::API2::Storage::Content->map_method_by_name("copy_volume_token");
-    ' >/dev/null 2>&1 || { echo "endpoint failed to register (module-level check)" >&2; return 1; }
+        require PVE::API2::Storage::Status;
+        die "not registered\n"
+            unless PVE::API2::Storage::Status->map_method_by_name("csi_copy_volume");
 
-    echo "verify: ok — pvedaemon/pveproxy active, copy_volume_token registered"
+        my ($handler_class, $method_info);
+        my $routable = eval {
+            die "find_handler unavailable\n"
+                unless PVE::API2::Storage::Status->can("find_handler");
+            # Path relative to the Storage::Status class root (/nodes/{node}/storage),
+            # i.e. the URI tail of POST /nodes/{node}/storage/local/csi-copy.
+            ($handler_class, $method_info) =
+                PVE::API2::Storage::Status->find_handler("POST", "/local/csi-copy", {});
+            1;
+        };
+        if (!$routable) {
+            warn "PVECSICopy verify: route resolution unavailable ($@); "
+                . "falling back to registration-only check\n";
+            exit 0;
+        }
+        die "csi-copy did not route (no handler)\n" if !$method_info;
+        die "csi-copy routed to \x27$method_info->{name}\x27, not csi_copy_volume — "
+            . "swallowed by a param sibling?\n"
+            if $method_info->{name} ne "csi_copy_volume";
+    ' >/dev/null || { echo "endpoint failed to register or route (module-level check)" >&2; return 1; }
+
+    echo "verify: ok — pvedaemon/pveproxy active, csi_copy_volume registered and routable"
     return 0
 }
 

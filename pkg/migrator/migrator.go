@@ -131,10 +131,11 @@ type Migrator struct {
 	HelperVMID int
 
 	// TokenCopyEndpoint routes the volume copy through the permission-gated
-	// endpoint from hack/pve-token-copy (POST .../content/{volume}/copy) instead
-	// of PVE's built-in root@pam-only "copy" method, so the migrator can run with
-	// a scoped API token. Requires the pve-csi-copy package on the Proxmox nodes.
-	// Default false preserves the built-in (root@pam) behavior.
+	// endpoint from hack/pve-token-copy (POST .../storage/{storage}/csi-copy)
+	// instead of PVE's built-in root@pam-only "copy" method, so the migrator can
+	// run with a scoped API token. Requires the pve-csi-copy package (>= 0.2.0)
+	// on the Proxmox nodes. Default false preserves the built-in (root@pam)
+	// behavior.
 	TokenCopyEndpoint bool
 }
 

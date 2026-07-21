@@ -18,8 +18,10 @@ package migrator_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jarcoal/httpmock"
@@ -281,6 +283,86 @@ func TestMigrateSuccess(t *testing.T) {
 	assert.NotContains(t, newPVC.Annotations, migrator.AnnotationMigrateNode)
 	assert.NotContains(t, newPVC.Annotations, migrator.AnnotationMigratePhase)
 	assert.Equal(t, "keep-me", newPVC.Annotations["unrelated"])
+}
+
+func TestMigrateSuccessTokenCopyEndpoint(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// With TokenCopyEndpoint the copy must POST the pve-csi-copy package's
+	// storage-level method — EXACT URL /nodes/{node}/storage/{storage}/csi-copy —
+	// and never the content/{volume} URL. The old content/{volume}/copy shape is
+	// unroutable on a real PVE: the router's greedy {volume} parameter swallows
+	// the '/copy' suffix and the request lands on the root-only built-in
+	// (regression: the client posted there and PVE answered 400 "duplicate
+	// parameter ... with conflicting values!").
+	disk := "vm-9999-pvc-exist"
+	upid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:imgcopy:103:root@pam:"
+	moved := false
+	body := map[string]any{}
+
+	httpmock.RegisterResponder(http.MethodPost, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/local-lvm/csi-copy",
+		func(req *http.Request) (*http.Response, error) {
+			moved = true
+
+			raw, _ := io.ReadAll(req.Body) //nolint: errcheck
+			_ = json.Unmarshal(raw, &body) //nolint: errcheck
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": upid})
+		})
+
+	// A POST to the content/{volume} URL in token mode is the bug this guards
+	// against: answer 500 so the migration would fail loudly, and assert below
+	// that it was never called.
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`,
+		httpmock.NewStringResponder(500, "token mode must not use the content copy URL"))
+
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/nodes/pve-2/storage/local-lvm/content",
+		func(_ *http.Request) (*http.Response, error) {
+			if moved {
+				return httpmock.NewJsonResponse(200, map[string]any{
+					"data": []map[string]any{{"volid": "local-lvm:" + disk, "format": "raw", "size": 5 * gib}},
+				})
+			}
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{}})
+		})
+
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+upid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": upid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t), TokenCopyEndpoint: true}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+	assert.True(t, moved, "the csi-copy endpoint must have been posted")
+
+	// Body carries volume/target/target_node ONLY: node comes from the URI, and
+	// PVE 400s a request whose body duplicates a URI parameter.
+	assert.Equal(t, disk, body["volume"])
+	assert.Equal(t, "local-lvm:"+disk, body["target"])
+	assert.Equal(t, "pve-2", body["target_node"])
+	assert.NotContains(t, body, "node", "the URI supplies node; a body copy conflicts")
+
+	for key, count := range httpmock.GetCallCountInfo() {
+		if strings.HasPrefix(key, http.MethodPost) && strings.Contains(key, "/storage/local-lvm/content/") {
+			assert.Zero(t, count, "token mode must not POST the content/{volume} URL: %s", key)
+		}
+	}
+
+	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle)
 }
 
 func TestMigrateTaskFailedNoRewire(t *testing.T) {
