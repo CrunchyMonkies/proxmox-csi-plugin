@@ -308,11 +308,15 @@ func TestReconcilePVCSuccess(t *testing.T) {
 	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
 	require.NoError(t, err)
 
-	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	// The rewire reserves a freshly named PV (claimRef pre-bind), so the
+	// migrated volume is reached through the PVC's volumeName.
+	pvc := getPVC(t, c)
+	require.NotEmpty(t, pvc.Spec.VolumeName)
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), pvc.Spec.VolumeName, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
 
-	pvc := getPVC(t, c)
 	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
 	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
 }

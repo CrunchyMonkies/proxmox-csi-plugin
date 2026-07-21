@@ -164,6 +164,11 @@ type Request struct {
 // the PV/PVC topology. It is resumable: if a previous attempt crashed after
 // the disk move, the move step is skipped.
 //
+// The disk is copied (not moved) to the target and the rewire forces the source
+// PV to Retain, so once the new PV is verified and bound Migrate reclaims the
+// leftover source disk copy to recover the space (a reclaim failure is warned
+// about but does not fail the already-succeeded migration).
+//
 //nolint:gocyclo,cyclop
 func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 	taskTimeout := req.TaskTimeout
@@ -445,6 +450,14 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 		return fmt.Errorf("failed to replace PV topology: %v", err)
 	}
 
+	// The migration is fully committed: the new PV is bound to the moved disk and
+	// its reclaim policy restored. The rewire forced the OLD PV to Retain, so the
+	// external provisioner will NOT reclaim the source disk copy the move left at
+	// the origin — reclaim it here to recover the space. This runs only after the
+	// bind is verified: every failure path above returns before this point, so the
+	// source copy (the safety net) is never deleted until the target is proven good.
+	m.reclaimSourceDisk(ctx, cluster, kubePVC, vol, targetVol, taskTimeout)
+
 	m.logf("persistentvolumeclaims %s has been migrated to proxmox node %s", req.PVCName, req.TargetNode)
 	m.event(kubePVC, corev1.EventTypeNormal, "MigrationCompleted", fmt.Sprintf("migrated to proxmox node %s", req.TargetNode))
 
@@ -539,6 +552,50 @@ func (m *Migrator) convertAndMove(ctx context.Context, cluster *goproxmox.APICli
 	return toolsproxmox.MoveQemuDisk(ctx, cluster, rawVol, targetNode, targetVol, taskTimeout, m.useTokenCopy(vol.Region()))
 }
 
+// reclaimSourceDisk deletes the source disk copy left at the migration origin once
+// the moved copy is verified and bound. The migrator copies the disk to the target
+// (the source file is not moved), and the claimRef pre-bind forces the source PV to
+// Retain, so the external provisioner never reclaims this copy — the migrator does.
+//
+// It MUST be called only on a fully verified success: the source copy is the sole
+// safety net until the moved disk is proven good, so it is never deleted before the
+// bind is confirmed (every failure path returns earlier, leaving the source under
+// Retain). It handles both cross-node moves (the source lives on the origin node)
+// and same-node cross-storage moves (the source lives on the origin storage). The
+// shared-storage and same-node/same-storage no-ops are short-circuited before any
+// move, so the source and target are always distinct here; the guard below is a
+// belt-and-braces check that never deletes the disk that was just migrated to.
+//
+// A failure only leaves a reclaimable disk behind — a space issue, not a correctness
+// one, because the migration itself already succeeded — so it is surfaced as a
+// warning (log + event) and never fails the completed migration. It returns true
+// when the source was reclaimed (or there was nothing to reclaim).
+func (m *Migrator) reclaimSourceDisk(
+	ctx context.Context,
+	cluster *goproxmox.APIClient,
+	pvc *corev1.PersistentVolumeClaim,
+	sourceVol, targetVol *volume.Volume,
+	taskTimeout int,
+) bool {
+	// Never touch the target's physical location: identical node, storage and disk
+	// would delete the disk the migration just landed on.
+	if sourceVol.Node() == targetVol.Node() && sourceVol.Storage() == targetVol.Storage() && sourceVol.Disk() == targetVol.Disk() {
+		return true
+	}
+
+	if err := toolsproxmox.DeleteDisk(ctx, cluster, sourceVol, sourceVol.Node(), taskTimeout); err != nil {
+		m.logf("WARNING: failed to reclaim source disk %s on %s after migration, reclaim it manually to free the space: %v", sourceVol.Disk(), sourceVol.Node(), err)
+		m.event(pvc, corev1.EventTypeWarning, "MigrationSourceReclaimFailed",
+			fmt.Sprintf("failed to reclaim source disk %s on %s (leftover copy, reclaim manually): %v", sourceVol.Disk(), sourceVol.Node(), err))
+
+		return false
+	}
+
+	m.logf("reclaimed source disk %s on %s", sourceVol.Disk(), sourceVol.Node())
+
+	return true
+}
+
 // waitPodsGone polls until no pods use the PVC, bounded by req.DrainTimeout (zero = unbounded).
 func (m *Migrator) waitPodsGone(ctx context.Context, req Request) error {
 	var deadline time.Time
@@ -582,6 +639,17 @@ func (m *Migrator) waitPodsGone(ctx context.Context, req Request) error {
 // annotatePV merge-patches a single annotation onto a PV.
 func (m *Migrator) annotatePV(ctx context.Context, pvName, key, value string) error {
 	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, key, value))
+
+	_, err := m.KClient.CoreV1().PersistentVolumes().Patch(ctx, pvName, types.MergePatchType, patch, metav1.PatchOptions{})
+
+	return err
+}
+
+// setPVReclaimPolicy merge-patches the reclaim policy of a PV. It is used to
+// guard the migrated disk (force the old PV to Retain before the destructive
+// rewire) and to restore the reserved PV's intended final policy after it binds.
+func (m *Migrator) setPVReclaimPolicy(ctx context.Context, pvName string, policy corev1.PersistentVolumeReclaimPolicy) error {
+	patch := []byte(fmt.Sprintf(`{"spec":{"persistentVolumeReclaimPolicy":%q}}`, policy))
 
 	_, err := m.KClient.CoreV1().PersistentVolumes().Patch(ctx, pvName, types.MergePatchType, patch, metav1.PatchOptions{})
 
