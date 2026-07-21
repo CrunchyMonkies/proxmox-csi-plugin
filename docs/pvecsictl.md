@@ -132,7 +132,17 @@ If you're met with
 ERROR Error: persistentvolumeclaims is using by pods: test-0 on node kube-store-11, cannot move volume
 ```
 
-you can force the process by adding the `--force` flag
+you can force the process by adding the `--force` flag.
+
+Forced migration needs the Proxmox VMID of the node running the pods. The
+node's `proxmox://<region>/<vmid>` providerID (set by the Proxmox CCM) or the
+`proxmox.sinextra.dev/instance-id` annotation is used when present; otherwise
+the migrator finds the VM through the Proxmox API — by node-name prefix
+verified against the node's SMBIOS system UUID, then by system UUID alone —
+the same lookup the CSI controller uses for attaching volumes, so clusters
+without the Proxmox CCM work out of the box. Use the annotation as an explicit
+override if the lookup cannot verify a VM (e.g. the node reports no system
+UUID).
 
 ```shell
 pvecsictl migrate --config=hack/cloud-config.yaml -n default storage-test-0 hvm-2 --force
