@@ -188,20 +188,22 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 		return fmt.Errorf("%w: persistentvolumeclaims %s is on shared storage %s, no migration needed", ErrInvalidTarget, req.PVCName, vol.Storage())
 	}
 
-	if vol.Node() == req.TargetNode {
-		return fmt.Errorf("%w: persistentvolumeclaims %s is already on proxmox node %s", ErrAlreadyOnTarget, req.PVCName, req.TargetNode)
-	}
-
-	cluster, err := m.PClient.GetProxmoxCluster(vol.Cluster())
-	if err != nil {
-		return fmt.Errorf("failed to get Proxmox cluster: %v", err)
-	}
-
 	// The storage the disk will live on after the migration: the volume's
 	// current storage name unless a different target storage was requested.
 	targetStorage := req.TargetStorage
 	if targetStorage == "" {
 		targetStorage = vol.Storage()
+	}
+
+	// A same-node request is a no-op only when the storage stays the same too;
+	// with a different target storage it is a same-node storage move.
+	if vol.Node() == req.TargetNode && targetStorage == vol.Storage() {
+		return fmt.Errorf("%w: persistentvolumeclaims %s is already on proxmox node %s (storage %s)", ErrAlreadyOnTarget, req.PVCName, req.TargetNode, targetStorage)
+	}
+
+	cluster, err := m.PClient.GetProxmoxCluster(vol.Cluster())
+	if err != nil {
+		return fmt.Errorf("failed to get Proxmox cluster: %v", err)
 	}
 
 	// Pre-flight: the target node must host the target storage. Never cordon
@@ -257,11 +259,12 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 				return fmt.Errorf("failed to delete partial disk on %s: %v", req.TargetNode, derr)
 			}
 		}
-	} else {
+	} else if vol.Node() != req.TargetNode {
 		// Shared-storage pre-flight: if the source disk is already visible on
 		// the target node, the storage is shared between the nodes — there is
 		// nothing to move, and an export/import would overwrite the file with
-		// itself. Skip instead of interrupting.
+		// itself. Skip instead of interrupting. Meaningless for same-node
+		// storage moves: the source disk is trivially present on its own node.
 		shared, _, derr := toolsproxmox.DiskOnNode(ctx, cluster, vol, req.TargetNode)
 		if derr == nil && shared {
 			return fmt.Errorf("%w: disk %s is already present on proxmox node %s (storage %s)", ErrSharedStorage, vol.Disk(), req.TargetNode, vol.Storage())

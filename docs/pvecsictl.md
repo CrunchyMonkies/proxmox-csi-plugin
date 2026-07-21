@@ -126,6 +126,8 @@ If the target node does not have a storage with the same name, move the disk int
 pvecsictl migrate --config=hack/cloud-config.yaml -n default storage-test-0 hvm-2 --storage local-zfs
 ```
 
+`--storage` also works with the volume's **current** node as the target: the disk is moved to the other storage on the same node (the zone does not change, only the storage in the volume handle). Without `--storage`, or with the current storage name, a same-node request is a no-op and is rejected as "already on target".
+
 If you're met with
 
 ```shell
