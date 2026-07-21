@@ -58,7 +58,7 @@ jobs:
           PUSH: "true"
           TAG: "edge"
       - name: Sign images
-        timeout-minutes: 4
+        timeout-minutes: 10
         run: make images-cosign
         env:
           TAG: "edge"
@@ -70,7 +70,7 @@ jobs:
           PUSH: "true"
           TAG: ${{ env.RELEASE_TAG }}
       - name: Sign images
-        timeout-minutes: 4
+        timeout-minutes: 10
         run: make images-cosign
         env:
           TAG: ${{ env.RELEASE_TAG }}
