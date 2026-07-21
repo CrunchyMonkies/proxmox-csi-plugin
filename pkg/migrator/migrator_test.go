@@ -395,6 +395,148 @@ func TestMigrateCrossStorageInvalidStorage(t *testing.T) {
 	assert.ErrorIs(t, err, migrator.ErrInvalidTarget)
 }
 
+func TestMigrateSameNodeCrossStorage(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Same-node storage move: the disk stays on pve-1 but moves from
+	// local-lvm to zfs. The shared mock lists the source disk in pve-1's own
+	// local-lvm content — trivially true for the disk's own node — so this
+	// also proves the shared-storage pre-flight is skipped for same-node
+	// moves (it would otherwise misfire as ErrSharedStorage).
+	disk := "vm-9999-pvc-exist"
+	upid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:qmmove:103:root@pam:"
+
+	movedTo := ""
+	moved := false
+
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`+disk,
+		func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body) //nolint: errcheck
+			movedTo = string(body)
+			moved = true
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": upid})
+		})
+
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+upid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": upid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	// Post-move verification lists the TARGET storage on the SAME node: empty
+	// before the move, the full-size target volid after. Exact URL: it must
+	// win over the mock's catch-all 500 regexp.
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/zfs/content",
+		func(_ *http.Request) (*http.Response, error) {
+			if moved {
+				return httpmock.NewJsonResponse(200, map[string]any{
+					"data": []map[string]any{{"volid": "zfs:" + disk, "format": "raw", "size": 5 * gib}},
+				})
+			}
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{}})
+		})
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    testZone,
+		TargetStorage: "zfs",
+	})
+	require.NoError(t, err)
+
+	assert.Contains(t, movedTo, "zfs:"+disk, "the move request must target the new storage")
+
+	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/"+testZone+"/zfs/"+disk, newPV.Spec.CSI.VolumeHandle, "volume handle must carry the new storage on the same node")
+	assert.Equal(t, []string{testZone}, newPV.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[1].Values, "zone must stay unchanged")
+	assert.NotContains(t, newPV.Annotations, migrator.AnnotationMigrateState)
+}
+
+func TestMigrateSameNodeSameStorage(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Same node AND same (explicitly requested) storage: a true no-op.
+	kclient := fake.NewClientset(newPVC(nil), newPV("vm-9999-pvc-exist", nil), newNode(), newCSINode())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    testZone,
+		TargetStorage: testStorage,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, migrator.ErrAlreadyOnTarget)
+}
+
+func TestMigrateSameNodeSameStorageDefaulted(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Same node with no target storage requested: the storage defaults to the
+	// volume's current one, so this is still "already on target".
+	kclient := fake.NewClientset(newPVC(nil), newPV("vm-9999-pvc-exist", nil), newNode(), newCSINode())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: testZone,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, migrator.ErrAlreadyOnTarget)
+}
+
+func TestMigrateSameNodeSkipsSharedStorageCheck(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The shared mock lists the source disk in the local-lvm content of every
+	// node — the exact condition that returns ErrSharedStorage for cross-node
+	// requests (TestMigrateSharedStorageSkip). For a same-node storage move
+	// the source disk is trivially present on its own node, so the pre-flight
+	// must be skipped: without a POST responder the migration proceeds all the
+	// way to the move and fails THERE, not with ErrSharedStorage.
+	disk := "vm-9999-pvc-exist"
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    testZone,
+		TargetStorage: "zfs",
+	})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, migrator.ErrSharedStorage)
+	assert.Contains(t, err.Error(), "failed to move disk")
+
+	// The PV was not rewired.
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/"+testZone+"/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle, "PV must be untouched")
+}
+
 func TestMigrateInvalidTarget(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset() //nolint: wsl_v5

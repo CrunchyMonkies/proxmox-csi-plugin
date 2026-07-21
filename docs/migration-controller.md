@@ -91,7 +91,7 @@ On success the PV's volume handle and node affinity point at the new zone, the r
 |---|---|---|
 | `csi.proxmox.sinextra.dev/migrate-node` | Proxmox node name | Migrate this PVC's volume to the given zone |
 | `csi.proxmox.sinextra.dev/migrate-force` | `"true"` | Allow disrupting pods that use the PVC (cordon + delete pods). Without it, an in-use PVC is skipped |
-| `csi.proxmox.sinextra.dev/migrate-storage` | storage ID | Move the disk into this storage on the target node (default: keep the storage name) |
+| `csi.proxmox.sinextra.dev/migrate-storage` | storage ID | Move the disk into this storage on the target node (default: keep the storage name). With `migrate-node` set to the volume's **current** node, this performs a same-node storage move (only the storage changes; same-node requests without a different storage are rejected as already-on-target) |
 
 #### Status annotations (written by the controller)
 
