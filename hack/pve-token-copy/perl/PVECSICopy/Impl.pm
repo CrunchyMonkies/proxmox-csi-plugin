@@ -30,6 +30,29 @@ use warnings;
 
 my $REGISTERED = 0;
 
+# Emit ONE syslog line when the endpoint is live, but ONLY when running inside
+# pvedaemon/pveproxy (guarded on $0) — never for some unrelated child perl that
+# happens to `require` this module. pve-csi-copy-verify greps the journal for this
+# line since each daemon's current start to prove the endpoint actually loaded in
+# the LIVE daemon (the taint-mode loader bug produced no such line). Fully
+# fail-safe: any failure to log is swallowed so it can never abort registration.
+sub _announce_registered {
+    return unless ($0 // '') =~ m{pve(daemon|proxy)};
+    my $msg = "pve-csi-copy: csi_copy_volume registered (pid $$)";
+    eval {
+        require PVE::SafeSyslog;
+        PVE::SafeSyslog::syslog('info', $msg);
+        1;
+    } or eval {
+        require Sys::Syslog;
+        Sys::Syslog::openlog('pve-csi-copy', 'ndelay,pid', 'daemon');
+        Sys::Syslog::syslog('info', '%s', $msg);
+        Sys::Syslog::closelog();
+        1;
+    };
+    return;
+}
+
 sub register {
     return if $REGISTERED;
 
@@ -45,6 +68,7 @@ sub register {
     if (PVE::API2::Storage::Status->can('map_method_by_name')
         && eval { PVE::API2::Storage::Status->map_method_by_name('csi_copy_volume') }) {
         $REGISTERED = 1;
+        _announce_registered();
         return;
     }
 
@@ -160,6 +184,7 @@ sub register {
     });
 
     $REGISTERED = 1;
+    _announce_registered();
     return;
 }
 

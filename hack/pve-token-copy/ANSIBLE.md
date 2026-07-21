@@ -12,7 +12,7 @@ Drop the tasks below into a role (or a play) that already targets your PVE hosts
 
 ```yaml
 # group_vars/proxmox.yml  (or wherever your PVE hosts are grouped)
-pve_csi_copy_version: "0.2.0"
+pve_csi_copy_version: "0.3.0"
 pve_csi_copy_deb_url: >-
   https://github.com/CrunchyMonkies/proxmox-csi-plugin/releases/download/pve-csi-copy-v{{ pve_csi_copy_version }}/pve-csi-copy_{{ pve_csi_copy_version }}_all.deb
 ```
@@ -62,8 +62,12 @@ release:
 - **`apt: deb:` is idempotent** — re-running with the same version is a no-op; bump
   `pve_csi_copy_version` (and the release) to upgrade.
 - **Verification.** `/usr/sbin/pve-csi-copy-verify` exits non-zero if the daemons are
-  down or the endpoint did not register — good for a handler, a `check_mode` gate, or
-  a post-upgrade smoke test. The package install itself only *warns* on a
+  down or the endpoint did not load — good for a handler, a `check_mode` gate, or a
+  post-upgrade smoke test. Its primary gate now checks the **live running daemon**:
+  it requires each of `pvedaemon`/`pveproxy` to have logged a successful
+  `csi_copy_volume` registration since its current start (so a daemon that is up but
+  never loaded the endpoint fails), with the module-compile / route resolution as a
+  secondary structural check. The package install itself only *warns* on a
   registration miss (it fails safe), so wire this in if you want a hard gate.
 - **Uninstall:** `ansible.builtin.apt: name=pve-csi-copy state=absent` — the maintainer
   scripts remove the loader drop-ins before the module and restart the daemons, so no
