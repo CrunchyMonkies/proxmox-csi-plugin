@@ -196,6 +196,8 @@ Here we've migrated the StatefulSet Pod with PVC to another node.
 Force mode helps to migrate StatefulSet deployment to another node without scaling down all replicas.
 It cordoned all nodes which have csi-proxmox plugin. Migrated the disk to another node and un-cordoned all nodes.
 
+> The rewire step repoints the PV/PVC at the migrated disk using a `claimRef` pre-bind (the [Reserving a PersistentVolume](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#reserving-a-persistentvolume) pattern): the new PV is reserved for the PVC before the old PVC is deleted, and the old PV is forced to `Retain` first. This makes migration safe for GitOps/controller-managed PVCs (Argo CD `selfHeal`, StatefulSet, operators) — a controller that recreates the deleted PVC rebinds to the migrated disk instead of provisioning an empty one, so **no controller pause is needed** as long as the manifest does not pin `spec.volumeName`. Once the migrated PV is verified and bound, `migrate` **reclaims the source disk copy automatically** (the move is a copy and the `Retain` guard stops the provisioner from doing so, for both cross-node and same-node cross-storage moves) — no manual `pvesm free` is needed on success; a reclaim failure is warned about without failing the migration.
+
 ### Rename
 
 Rename PersistentVolumeClaim.

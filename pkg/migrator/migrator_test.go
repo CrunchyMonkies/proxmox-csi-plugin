@@ -52,6 +52,38 @@ const (
 	testNS      = "default"
 )
 
+// migratedPV returns the PersistentVolume the test PVC is bound to after a
+// successful migration. The rewire reserves a freshly named PV (claimRef
+// pre-bind), so the migrated volume is found through the PVC's volumeName
+// rather than the original PV name.
+func migratedPV(t *testing.T, kclient *fake.Clientset) *corev1.PersistentVolume {
+	t.Helper()
+
+	pvc, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotEmpty(t, pvc.Spec.VolumeName, "PVC must be bound after migration")
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), pvc.Spec.VolumeName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	return pv
+}
+
+// countPVCUpdates returns how many times the PVC resource received an update
+// action. The claimRef pre-bind rewire must never update a PVC (the migrator's
+// RBAC omits the update verb and a bound PVC's volumeName is immutable).
+func countPVCUpdates(kclient *fake.Clientset) int {
+	n := 0
+
+	for _, a := range kclient.Actions() {
+		if a.GetVerb() == "update" && a.GetResource().Resource == "persistentvolumeclaims" {
+			n++
+		}
+	}
+
+	return n
+}
+
 func newProxmoxPool(t *testing.T) *pxpool.ProxmoxPool {
 	t.Helper()
 
@@ -211,9 +243,14 @@ func registerTargetContent(node, storage string, volids ...string) {
 // disk: the POST returns a task UPID and the task status reports stopped/OK.
 // The target node's content listing is empty until the move happens and
 // contains the target volid afterwards (the migrator checks it before the
-// move for shared storage, and after the move for verification).
+// move for shared storage, and after the move for verification). It also mocks
+// the post-success source-disk DELETE (the migrator reclaims the source copy the
+// move leaves at the origin) so the standard cross-node success path is fully served.
+//
+// nolint: unparam
 func registerMoveResponder(disk, targetVolid string) {
 	upid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:qmmove:103:root@pam:"
+	delUpid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:imgdel:103:root@pam:"
 	moved := false
 
 	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`+disk,
@@ -233,6 +270,14 @@ func registerMoveResponder(disk, targetVolid string) {
 
 			return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{}})
 		})
+
+	// Source-disk reclaim after a verified success: DELETE on the source node/storage.
+	httpmock.RegisterResponder(http.MethodDelete, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/local-lvm/content/"+disk,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": delUpid}))
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+delUpid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": delUpid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
 
 	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+upid+`/status`,
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{
@@ -272,8 +317,7 @@ func TestMigrateSuccess(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	newPV := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle)
 	assert.Equal(t, []string{"pve-2"}, newPV.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[1].Values)
 	assert.NotContains(t, newPV.Annotations, migrator.AnnotationMigrateState)
@@ -360,8 +404,7 @@ func TestMigrateSuccessTokenCopyEndpoint(t *testing.T) {
 		}
 	}
 
-	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	newPV := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle)
 }
 
@@ -452,8 +495,7 @@ func TestMigrateCrossStorage(t *testing.T) {
 
 	assert.Contains(t, movedTo, "zfs:"+disk, "the move request must target the new storage")
 
-	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	newPV := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/zfs/"+disk, newPV.Spec.CSI.VolumeHandle, "volume handle must carry the new storage")
 }
 
@@ -536,11 +578,196 @@ func TestMigrateSameNodeCrossStorage(t *testing.T) {
 
 	assert.Contains(t, movedTo, "zfs:"+disk, "the move request must target the new storage")
 
-	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	newPV := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/"+testZone+"/zfs/"+disk, newPV.Spec.CSI.VolumeHandle, "volume handle must carry the new storage on the same node")
 	assert.Equal(t, []string{testZone}, newPV.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[1].Values, "zone must stay unchanged")
 	assert.NotContains(t, newPV.Annotations, migrator.AnnotationMigrateState)
+}
+
+func TestMigrateReclaimsSourceDiskOnSuccess(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// A verified, fully-bound migration must reclaim the source disk copy the move
+	// leaves at the origin (the rewire forces the source PV to Retain, so the
+	// provisioner never does). The DELETE must hit the SOURCE node+storage+disk and
+	// fire only AFTER the PVC bound to the freshly reserved (migrated) PV.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+
+	sourceDeleted := false
+	boundAtDelete := false
+	delUpid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:imgdel:200:root@pam:"
+
+	httpmock.RegisterResponder(http.MethodDelete, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/local-lvm/content/"+disk,
+		func(_ *http.Request) (*http.Response, error) {
+			sourceDeleted = true
+
+			// The PVC is already rebound to the migrated PV (never the original)
+			// by the time the source is reclaimed: this proves the ordering.
+			pvc, gerr := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+			if gerr == nil && pvc.Spec.VolumeName != "" && pvc.Spec.VolumeName != testPVName {
+				boundAtDelete = true
+			}
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": delUpid})
+		})
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+delUpid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": delUpid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+
+	assert.True(t, sourceDeleted, "the source disk copy on pve-1/local-lvm must be reclaimed on success")
+	assert.True(t, boundAtDelete, "the source disk must be deleted only AFTER the PVC bound to the migrated PV")
+}
+
+func TestMigrateFailedRewireKeepsSourceDisk(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The rewire fails: a racing provisioner binds the recreated PVC to a fresh
+	// empty volume instead of the reserved one. At that point the source copy is
+	// the ONLY good copy of the data, so it must NOT be deleted — it stays under
+	// Retain as the safety net.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+
+	sourceDeleted := false
+
+	httpmock.RegisterResponder(http.MethodDelete, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/local-lvm/content/"+disk,
+		func(_ *http.Request) (*http.Response, error) {
+			sourceDeleted = true
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": "UPID:pve-1:0:0:0:imgdel:0:root@pam:"})
+		})
+
+	tracker := kclient.Tracker()
+	emptyPVName := "pvc-controller-empty"
+
+	kclient.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		da, ok := action.(k8stesting.DeleteAction)
+		if !ok || da.GetName() != testPVCName {
+			return false, nil, nil
+		}
+
+		_ = tracker.Delete(pvcGVR, testNS, testPVCName) //nolint: errcheck
+
+		emptyPV := newPV("vm-9999-pvc-empty-provisioned", nil)
+		emptyPV.Name = emptyPVName
+		emptyPV.Spec.ClaimRef = nil
+		_ = tracker.Create(pvGVR, emptyPV, "") //nolint: errcheck
+
+		fresh := newPVC(nil)
+		fresh.Spec.VolumeName = emptyPVName
+		fresh.UID = "controller-recreated-uid"
+		_ = tracker.Create(pvcGVR, fresh, testNS) //nolint: errcheck
+
+		return true, nil, nil
+	})
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not the reserved volume")
+
+	assert.False(t, sourceDeleted, "a failed rewire must never delete the source disk — it is the only good copy")
+}
+
+func TestMigrateSameNodeCrossStorageReclaimsSourceStorage(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Same-node storage move (local-lvm -> zfs on pve-1). The reclaim must delete
+	// the SOURCE-storage copy (local-lvm), never the target-storage copy (zfs) the
+	// disk was just migrated to.
+	disk := "vm-9999-pvc-exist"
+	upid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:qmmove:103:root@pam:"
+	delUpid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:imgdel:103:root@pam:"
+	moved := false
+
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`+disk,
+		func(_ *http.Request) (*http.Response, error) {
+			moved = true
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": upid})
+		})
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+upid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": upid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/zfs/content",
+		func(_ *http.Request) (*http.Response, error) {
+			if moved {
+				return httpmock.NewJsonResponse(200, map[string]any{
+					"data": []map[string]any{{"volid": "zfs:" + disk, "format": "raw", "size": 5 * gib}},
+				})
+			}
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{}})
+		})
+
+	sourceDeleted := false
+	targetDeleted := false
+
+	httpmock.RegisterResponder(http.MethodDelete, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/local-lvm/content/"+disk,
+		func(_ *http.Request) (*http.Response, error) {
+			sourceDeleted = true
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": delUpid})
+		})
+	httpmock.RegisterResponder(http.MethodDelete, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/zfs/content/"+disk,
+		func(_ *http.Request) (*http.Response, error) {
+			targetDeleted = true
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": delUpid})
+		})
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+delUpid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": delUpid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    testZone,
+		TargetStorage: "zfs",
+	})
+	require.NoError(t, err)
+
+	assert.True(t, sourceDeleted, "the source-storage (local-lvm) copy must be reclaimed")
+	assert.False(t, targetDeleted, "the target-storage (zfs) copy must never be deleted")
+
+	newPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/"+testZone+"/zfs/"+disk, newPV.Spec.CSI.VolumeHandle)
 }
 
 func TestMigrateSameNodeSameStorage(t *testing.T) {
@@ -754,8 +981,7 @@ func TestMigrateForceForeignProviderIDFallsBackToVMLookup(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	pv := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
 }
 
@@ -825,8 +1051,7 @@ func TestMigrateForceForeignProviderIDFallsBackToUUIDLookup(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	pv := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
 }
 
@@ -1012,8 +1237,7 @@ func TestMigrateResumePartialDiskRedoesMove(t *testing.T) {
 	assert.True(t, deleted, "the partial file must be deleted")
 	assert.True(t, moved, "the move must be redone")
 
-	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	newPV := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle)
 }
 
@@ -1131,8 +1355,7 @@ func TestMigrateQcow2ConvertAndMove(t *testing.T) {
 	assert.Contains(t, copiedTo, "local-lvm:"+rawTarget, "the converted copy must be moved to the .raw target volid")
 	assert.True(t, vmDeleted, "the helper VM must be deleted")
 
-	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	pv := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+rawTarget, pv.Spec.CSI.VolumeHandle)
 }
 
@@ -1246,8 +1469,275 @@ func TestMigrateResumeSkipsMove(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	newPV, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
-	require.NoError(t, err)
+	newPV := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle)
 	assert.NotContains(t, newPV.Annotations, migrator.AnnotationMigrateState)
+}
+
+// pvcGVR / pvListGVK are used by the controller-recreation reactors below to
+// drive the fake object tracker directly (tracker mutations are invisible to
+// the recorded action list, so a simulated binder does not register as a PVC
+// update by the migrator).
+var (
+	pvcGVR    = corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims")
+	pvGVR     = corev1.SchemeGroupVersion.WithResource("persistentvolumes")
+	pvListGVK = corev1.SchemeGroupVersion.WithKind("PersistentVolume")
+)
+
+// reservedPVName returns the name of the migrator's reserved (claimRef pre-bind)
+// PV in the tracker: the CSI PV that claims the test PVC and is not the original.
+func reservedPVName(tracker k8stesting.ObjectTracker) string {
+	obj, err := tracker.List(pvGVR, pvListGVK, "")
+	if err != nil {
+		return ""
+	}
+
+	list, ok := obj.(*corev1.PersistentVolumeList)
+	if !ok {
+		return ""
+	}
+
+	for i := range list.Items {
+		pv := &list.Items[i]
+		if pv.Name != testPVName && pv.Spec.ClaimRef != nil && pv.Spec.ClaimRef.Name == testPVCName {
+			return pv.Name
+		}
+	}
+
+	return ""
+}
+
+// simulateControllerRecreate installs a delete reactor that re-creates the PVC
+// the instant the migrator deletes it — modeling ArgoCD selfHeal / a
+// StatefulSet / an operator recreating a managed PVC. The recreated PVC has no
+// volumeName (Pending), so only the reserved PV's claimRef can bind it.
+func simulateControllerRecreate(kclient *fake.Clientset, recreated **corev1.PersistentVolumeClaim) {
+	tracker := kclient.Tracker()
+
+	kclient.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		da, ok := action.(k8stesting.DeleteAction)
+		if !ok || da.GetName() != testPVCName {
+			return false, nil, nil
+		}
+
+		_ = tracker.Delete(pvcGVR, testNS, testPVCName) //nolint: errcheck
+
+		fresh := newPVC(nil)
+		fresh.Spec.VolumeName = ""
+		fresh.UID = "controller-recreated-uid"
+		fresh.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
+
+		_ = tracker.Create(pvcGVR, fresh, testNS) //nolint: errcheck
+
+		if recreated != nil {
+			*recreated = fresh
+		}
+
+		return true, nil, nil
+	})
+}
+
+// simulateClaimRefBinder installs a get reactor that binds a still-Pending test
+// PVC to the migrator's reserved PV — the Kubernetes binder honoring the
+// empty-UID claimRef reservation. It mutates the tracker directly, so it never
+// appears as a PVC update action.
+func simulateClaimRefBinder(kclient *fake.Clientset) {
+	tracker := kclient.Tracker()
+
+	kclient.PrependReactor("get", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		ga, ok := action.(k8stesting.GetAction)
+		if !ok || ga.GetName() != testPVCName {
+			return false, nil, nil
+		}
+
+		obj, err := tracker.Get(pvcGVR, testNS, testPVCName)
+		if err != nil {
+			return false, nil, nil //nolint: nilerr
+		}
+
+		claim, ok := obj.(*corev1.PersistentVolumeClaim)
+		if !ok {
+			return false, nil, nil
+		}
+
+		claim = claim.DeepCopy()
+
+		if claim.Spec.VolumeName == "" {
+			if reserved := reservedPVName(tracker); reserved != "" {
+				claim.Spec.VolumeName = reserved
+				claim.Status.Phase = corev1.ClaimBound
+				_ = tracker.Update(pvcGVR, claim, testNS) //nolint: errcheck
+			}
+		}
+
+		return true, claim, nil
+	})
+}
+
+// assertRetainedBeforeDelete asserts the old PV was patched to Retain before it
+// was deleted, so the already-moved disk can never be garbage collected during
+// the rewire.
+func assertRetainedBeforeDelete(t *testing.T, kclient *fake.Clientset) {
+	t.Helper()
+
+	retainPatched := false
+	retainBeforeDelete := false
+
+	for _, a := range kclient.Actions() {
+		if a.GetVerb() == "patch" && a.GetResource().Resource == "persistentvolumes" {
+			if pa, ok := a.(k8stesting.PatchAction); ok && pa.GetName() == testPVName &&
+				strings.Contains(string(pa.GetPatch()), "Retain") {
+				retainPatched = true
+			}
+		}
+
+		if a.GetVerb() == "delete" && a.GetResource().Resource == "persistentvolumes" {
+			if da, ok := a.(k8stesting.DeleteAction); ok && da.GetName() == testPVName && retainPatched {
+				retainBeforeDelete = true
+			}
+		}
+	}
+
+	assert.True(t, retainBeforeDelete, "old PV must be patched to Retain before it is deleted")
+}
+
+func TestMigrateManagedPVCRecreatedBindsReservedPV(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// A controller-managed PVC: the instant the migrator deletes it, the
+	// controller recreates it (Pending). The claimRef pre-bind must make it bind
+	// to the reserved data PV — never to a freshly provisioned empty volume —
+	// and the migrator must never update a PVC. The source PV starts as Delete so
+	// this also exercises the Retain guard and the reclaim-policy restore.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	pv := newPV(disk, nil)
+	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+
+	kclient := fake.NewClientset(newPVC(nil), pv, newNode(), newCSINode())
+
+	simulateControllerRecreate(kclient, nil)
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+
+	newPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle, "PVC must bind to the reserved data PV, preserving the moved volume handle")
+	require.NotNil(t, newPV.Spec.ClaimRef)
+	assert.Equal(t, testPVCName, newPV.Spec.ClaimRef.Name)
+	assert.Empty(t, newPV.Spec.ClaimRef.UID, "the reservation claimRef UID must be empty")
+	assert.Equal(t, corev1.PersistentVolumeReclaimDelete, newPV.Spec.PersistentVolumeReclaimPolicy, "the reserved PV's reclaim policy must be restored after binding")
+
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
+	assertRetainedBeforeDelete(t, kclient)
+}
+
+func TestMigrateUnmanagedPVCBindsReservedPV(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// No controller recreates the PVC: the migrator creates it, pre-bound to the
+	// reserved PV. A Delete-policy source PV exercises the Retain guard and the
+	// reclaim-policy restore on the happy path too.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	pv := newPV(disk, nil)
+	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+
+	kclient := fake.NewClientset(newPVC(nil), pv, newNode(), newCSINode())
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+
+	newPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle)
+	require.NotNil(t, newPV.Spec.ClaimRef)
+	assert.Empty(t, newPV.Spec.ClaimRef.UID, "the reservation claimRef UID must be empty")
+	assert.Equal(t, corev1.PersistentVolumeReclaimDelete, newPV.Spec.PersistentVolumeReclaimPolicy)
+
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
+	assertRetainedBeforeDelete(t, kclient)
+}
+
+func TestMigrateManagedPVCReboundToDifferentPVFails(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The controller recreates the PVC and a racing provisioner binds it to a
+	// FRESH EMPTY volume before the reservation can take effect. The migrator
+	// must detect the wrong binding and fail loudly — leaving the moved disk safe
+	// on its reserved, Retain PV — rather than silently accepting the empty one.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+
+	tracker := kclient.Tracker()
+	emptyPVName := "pvc-controller-empty"
+
+	kclient.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		da, ok := action.(k8stesting.DeleteAction)
+		if !ok || da.GetName() != testPVCName {
+			return false, nil, nil
+		}
+
+		_ = tracker.Delete(pvcGVR, testNS, testPVCName) //nolint: errcheck
+
+		// A fresh empty PV the racing provisioner created, and a recreated PVC
+		// already bound to it.
+		emptyPV := newPV("vm-9999-pvc-empty-provisioned", nil)
+		emptyPV.Name = emptyPVName
+		emptyPV.Spec.ClaimRef = nil
+		_ = tracker.Create(pvGVR, emptyPV, "") //nolint: errcheck
+
+		fresh := newPVC(nil)
+		fresh.Spec.VolumeName = emptyPVName
+		fresh.UID = "controller-recreated-uid"
+		_ = tracker.Create(pvcGVR, fresh, testNS) //nolint: errcheck
+
+		return true, nil, nil
+	})
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not the reserved volume")
+
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC, even on the failure path")
+
+	// The moved disk is preserved: its reserved PV still exists, Available and Retain.
+	reserved := reservedPVName(tracker)
+	require.NotEmpty(t, reserved, "the reserved data PV must survive so the moved disk is not lost")
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), reserved, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
+	assert.Equal(t, corev1.PersistentVolumeReclaimRetain, pv.Spec.PersistentVolumeReclaimPolicy, "the reserved data PV must stay Retain so the moved disk is never garbage collected")
 }

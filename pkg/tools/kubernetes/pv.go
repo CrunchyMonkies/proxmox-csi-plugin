@@ -153,6 +153,38 @@ func PVsInZone(ctx context.Context, clientset clientkubernetes.Interface, driver
 	return pvs, nil
 }
 
+// PVCWaitBound waits until the PersistentVolumeClaim is bound to expectedPVName.
+// It returns nil once spec.volumeName equals expectedPVName, and an error if the
+// PVC binds to a different PersistentVolume (a controller provisioned an empty
+// volume before the reservation took effect) or the wait times out.
+func PVCWaitBound(ctx context.Context, clientset clientkubernetes.Interface, namespace, pvcName, expectedPVName string) error {
+	timeout := time.After(5 * time.Minute)
+
+	for {
+		pvc, err := clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				return fmt.Errorf("failed to get PersistentVolumeClaim %s: %v", pvcName, err)
+			}
+		} else if bound := pvc.Spec.VolumeName; bound != "" {
+			if bound == expectedPVName {
+				return nil
+			}
+
+			return fmt.Errorf("PersistentVolumeClaim %s bound to %s, not the reserved volume %s: a controller provisioned a new volume; the migrated disk is preserved on PV %s (Available, Retain)",
+				pvcName, bound, expectedPVName, expectedPVName)
+		}
+
+		select {
+		case <-time.After(2 * time.Second):
+		case <-timeout:
+			return fmt.Errorf("timeout waiting for PersistentVolumeClaim %s to bind to %s", pvcName, expectedPVName)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // PVWaitDelete waits for the specified PersistentVolume to be deleted.
 func PVWaitDelete(ctx context.Context, clientset clientkubernetes.Interface, pvName string) error {
 	// We reuse PV name for change nodeSelector, but some controllers may modify PV on deletion event.
