@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jarcoal/httpmock"
 	"github.com/luthermonson/go-proxmox"
@@ -1484,34 +1485,36 @@ var (
 	pvListGVK = corev1.SchemeGroupVersion.WithKind("PersistentVolume")
 )
 
-// reservedPVName returns the name of the migrator's reserved (claimRef pre-bind)
-// PV in the tracker: the CSI PV that claims the test PVC and is not the original.
-func reservedPVName(tracker k8stesting.ObjectTracker) string {
+// reservedPV returns the migrator's reserved (claimRef pre-bind) PV in the
+// tracker: the CSI PV that claims the test PVC and is not the original.
+func reservedPV(tracker k8stesting.ObjectTracker) *corev1.PersistentVolume {
 	obj, err := tracker.List(pvGVR, pvListGVK, "")
 	if err != nil {
-		return ""
+		return nil
 	}
 
 	list, ok := obj.(*corev1.PersistentVolumeList)
 	if !ok {
-		return ""
+		return nil
 	}
 
 	for i := range list.Items {
 		pv := &list.Items[i]
 		if pv.Name != testPVName && pv.Spec.ClaimRef != nil && pv.Spec.ClaimRef.Name == testPVCName {
-			return pv.Name
+			return pv
 		}
 	}
 
-	return ""
+	return nil
 }
 
 // simulateControllerRecreate installs a delete reactor that re-creates the PVC
 // the instant the migrator deletes it — modeling ArgoCD selfHeal / a
 // StatefulSet / an operator recreating a managed PVC. The recreated PVC has no
-// volumeName (Pending), so only the reserved PV's claimRef can bind it.
-func simulateControllerRecreate(kclient *fake.Clientset, recreated **corev1.PersistentVolumeClaim) {
+// volumeName (Pending), so only the reserved PV's claimRef can bind it. The
+// optional mutators shape the recreated PVC (e.g. the StorageClass an
+// admission default would fill in, or an owner-pinned class).
+func simulateControllerRecreate(kclient *fake.Clientset, mutators ...func(*corev1.PersistentVolumeClaim)) {
 	tracker := kclient.Tracker()
 
 	kclient.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -1527,19 +1530,30 @@ func simulateControllerRecreate(kclient *fake.Clientset, recreated **corev1.Pers
 		fresh.UID = "controller-recreated-uid"
 		fresh.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
 
-		_ = tracker.Create(pvcGVR, fresh, testNS) //nolint: errcheck
-
-		if recreated != nil {
-			*recreated = fresh
+		for _, mutate := range mutators {
+			mutate(fresh)
 		}
+
+		_ = tracker.Create(pvcGVR, fresh, testNS) //nolint: errcheck
 
 		return true, nil, nil
 	})
 }
 
+// pvcStorageClass mirrors how the binder reads a PVC's class (nil means "").
+func pvcStorageClass(pvc *corev1.PersistentVolumeClaim) string {
+	if pvc.Spec.StorageClassName == nil {
+		return ""
+	}
+
+	return *pvc.Spec.StorageClassName
+}
+
 // simulateClaimRefBinder installs a get reactor that binds a still-Pending test
 // PVC to the migrator's reserved PV — the Kubernetes binder honoring the
-// empty-UID claimRef reservation. It mutates the tracker directly, so it never
+// empty-UID claimRef reservation. Like the real binder it refuses a PV whose
+// storageClassName differs from the PVC's, so tests prove the reserved PV
+// carries a bindable class. It mutates the tracker directly, so it never
 // appears as a PVC update action.
 func simulateClaimRefBinder(kclient *fake.Clientset) {
 	tracker := kclient.Tracker()
@@ -1563,8 +1577,8 @@ func simulateClaimRefBinder(kclient *fake.Clientset) {
 		claim = claim.DeepCopy()
 
 		if claim.Spec.VolumeName == "" {
-			if reserved := reservedPVName(tracker); reserved != "" {
-				claim.Spec.VolumeName = reserved
+			if reserved := reservedPV(tracker); reserved != nil && reserved.Spec.StorageClassName == pvcStorageClass(claim) {
+				claim.Spec.VolumeName = reserved.Name
 				claim.Status.Phase = corev1.ClaimBound
 				_ = tracker.Update(pvcGVR, claim, testNS) //nolint: errcheck
 			}
@@ -1620,7 +1634,7 @@ func TestMigrateManagedPVCRecreatedBindsReservedPV(t *testing.T) {
 
 	kclient := fake.NewClientset(newPVC(nil), pv, newNode(), newCSINode())
 
-	simulateControllerRecreate(kclient, nil)
+	simulateControllerRecreate(kclient)
 	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
@@ -1733,11 +1747,646 @@ func TestMigrateManagedPVCReboundToDifferentPVFails(t *testing.T) {
 	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC, even on the failure path")
 
 	// The moved disk is preserved: its reserved PV still exists, Available and Retain.
-	reserved := reservedPVName(tracker)
-	require.NotEmpty(t, reserved, "the reserved data PV must survive so the moved disk is not lost")
+	reserved := reservedPV(tracker)
+	require.NotNil(t, reserved, "the reserved data PV must survive so the moved disk is not lost")
 
-	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), reserved, metav1.GetOptions{})
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), reserved.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
 	assert.Equal(t, corev1.PersistentVolumeReclaimRetain, pv.Spec.PersistentVolumeReclaimPolicy, "the reserved data PV must stay Retain so the moved disk is never garbage collected")
+}
+
+// newTestStorageClass returns a StorageClass of this driver naming the given
+// Proxmox storage; isDefault marks it as the cluster default.
+func newTestStorageClass(name, storage string, isDefault bool) *storagev1.StorageClass {
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: name},
+		Provisioner: csi.DriverName,
+		Parameters:  map[string]string{csi.StorageIDKey: storage},
+	}
+	if isDefault {
+		sc.Annotations = map[string]string{migrator.AnnotationDefaultStorageClass: "true"}
+	}
+
+	return sc
+}
+
+// registerCrossStorageMove wires the responders for a cross-storage move of
+// the test disk from pve-1/local-lvm to pve-2/zfs (the TestMigrateCrossStorage
+// shape, shared by the StorageClass-alignment tests).
+//
+// nolint: unparam
+func registerCrossStorageMove(disk string) {
+	upid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:qmmove:103:root@pam:"
+
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`+disk,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": upid}))
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+upid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": upid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	// Shared-storage pre-flight (source storage on the target node) is empty;
+	// post-move verification lists the disk on the target storage.
+	registerTargetContent("pve-2", "local-lvm")
+	registerTargetContent("pve-2", "zfs", "zfs:"+disk)
+}
+
+func TestMigrateCrossStorageManagedPVCAdoptsTargetClass(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Cross-storage move of a CONTROLLER-MANAGED PVC: the owner recreates the
+	// PVC from its manifest, which omits storageClassName, so admission fills
+	// the cluster DEFAULT class — here proxmox-new, the (single) class of the
+	// TARGET storage. The rewired PV/PVC must adopt that class; keeping the old
+	// class would make the apiserver refuse the claimRef pre-bind (class
+	// mismatch) and hand the PVC to the dynamic provisioner instead.
+	disk := "vm-9999-pvc-exist"
+	registerCrossStorageMove(disk)
+
+	oldClass := "proxmox-old"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &oldClass
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = oldClass
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(),
+		newTestStorageClass("proxmox-old", "local-lvm", false),
+		newTestStorageClass("proxmox-new", "zfs", true))
+
+	newClass := "proxmox-new"
+
+	simulateControllerRecreate(kclient, func(fresh *corev1.PersistentVolumeClaim) {
+		// Admission fills the cluster-default StorageClass on the owner's
+		// class-less manifest.
+		fresh.Spec.StorageClassName = &newClass
+	})
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    "pve-2",
+		TargetStorage: "zfs",
+	})
+	require.NoError(t, err)
+
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/zfs/"+disk, boundPV.Spec.CSI.VolumeHandle, "the recreated PVC must bind the reserved data PV")
+	assert.Equal(t, "proxmox-new", boundPV.Spec.StorageClassName, "the reserved PV must carry the target storage's class")
+
+	boundPVC, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, boundPVC.Spec.StorageClassName)
+	assert.Equal(t, "proxmox-new", *boundPVC.Spec.StorageClassName)
+
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
+}
+
+func TestMigrateCrossStorageAmbiguousClassKeepsOldClass(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// TWO StorageClasses name the target storage: adopting either would be a
+	// guess, so the rewired PV/PVC must keep the old class (current behavior).
+	disk := "vm-9999-pvc-exist"
+	registerCrossStorageMove(disk)
+
+	oldClass := "proxmox-old"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &oldClass
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = oldClass
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(),
+		newTestStorageClass("proxmox-new-1", "zfs", true),
+		newTestStorageClass("proxmox-new-2", "zfs", false))
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    "pve-2",
+		TargetStorage: "zfs",
+	})
+	require.NoError(t, err)
+
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/zfs/"+disk, boundPV.Spec.CSI.VolumeHandle)
+	assert.Equal(t, oldClass, boundPV.Spec.StorageClassName, "an ambiguous class match must fall back to the old class")
+
+	boundPVC, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, boundPVC.Spec.StorageClassName)
+	assert.Equal(t, oldClass, *boundPVC.Spec.StorageClassName)
+}
+
+func TestMigrateManagedPVCPinnedClassReReservesAndBinds(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The owner's manifest PINS a storageClassName (StatefulSet
+	// volumeClaimTemplates): the recreated PVC carries proxmox-pinned, not the
+	// target storage's class the reserved PV was aligned to. The PVC stays
+	// Pending (nothing provisions the pinned class), so the migrator must
+	// re-reserve the data PV under the OBSERVED class and the claim then binds
+	// the data disk — instead of failing loudly on a class mismatch.
+	disk := "vm-9999-pvc-exist"
+	registerCrossStorageMove(disk)
+
+	oldClass := "proxmox-old"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &oldClass
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = oldClass
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(),
+		newTestStorageClass("proxmox-old", "local-lvm", false),
+		newTestStorageClass("proxmox-new", "zfs", true))
+
+	pinned := "proxmox-pinned"
+
+	simulateControllerRecreate(kclient, func(fresh *corev1.PersistentVolumeClaim) {
+		fresh.Spec.StorageClassName = &pinned
+	})
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    "pve-2",
+		TargetStorage: "zfs",
+	})
+	require.NoError(t, err)
+
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/zfs/"+disk, boundPV.Spec.CSI.VolumeHandle, "the pinned-class PVC must bind the re-reserved DATA PV")
+	assert.Equal(t, pinned, boundPV.Spec.StorageClassName, "the re-reserved PV must carry the observed pinned class")
+
+	boundPVC, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, boundPVC.Spec.StorageClassName)
+	assert.Equal(t, pinned, *boundPVC.Spec.StorageClassName)
+
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
+}
+
+func TestMigrateManagedPVCPinnedClassRacingEmptyPVReplaced(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Worst case: the owner recreates the PVC with a PINNED class AND a dynamic
+	// provisioner immediately binds it to a fresh EMPTY volume. The migrator
+	// must delete that racing PVC/PV pair (the empty disk, never the data
+	// disk), re-reserve the data PV under the pinned class, and let the owner's
+	// SECOND recreate bind the data disk.
+	disk := "vm-9999-pvc-exist"
+	registerCrossStorageMove(disk)
+
+	oldClass := "proxmox-old"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &oldClass
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = oldClass
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(),
+		newTestStorageClass("proxmox-old", "local-lvm", false),
+		newTestStorageClass("proxmox-new", "zfs", true))
+
+	tracker := kclient.Tracker()
+	pinned := "proxmox-pinned"
+	racingPVName := "pvc-racing-empty"
+	deletes := 0
+
+	kclient.PrependReactor("delete", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		da, ok := action.(k8stesting.DeleteAction)
+		if !ok || da.GetName() != testPVCName {
+			return false, nil, nil
+		}
+
+		deletes++
+
+		_ = tracker.Delete(pvcGVR, testNS, testPVCName) //nolint: errcheck
+
+		fresh := newPVC(nil)
+		fresh.Spec.StorageClassName = &pinned
+		fresh.Spec.VolumeName = ""
+		fresh.UID = "controller-recreated-uid"
+		fresh.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
+
+		if deletes == 1 {
+			// The racing provisioner already produced a fresh EMPTY volume and
+			// bound the first recreate to it.
+			racing := newPV("vm-9999-pvc-racing-empty", nil)
+			racing.Name = racingPVName
+			// A freshly provisioned PV bound to the recreated PVC claims it back
+			// (namespace/name) — the guard requires this to delete it.
+			racing.Spec.ClaimRef = &corev1.ObjectReference{
+				Kind:       "PersistentVolumeClaim",
+				APIVersion: "v1",
+				Namespace:  testNS,
+				Name:       testPVCName,
+				UID:        "controller-recreated-uid",
+			}
+			racing.Spec.StorageClassName = pinned
+			racing.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+			// Clearly after the (un-truncated) rewire start so the strict-after
+			// freshness guard treats it as a racing volume.
+			racing.CreationTimestamp = metav1.NewTime(time.Now().Add(time.Minute))
+			_ = tracker.Create(pvGVR, racing, "") //nolint: errcheck
+
+			fresh.Spec.VolumeName = racingPVName
+			fresh.Status.Phase = corev1.ClaimBound
+		}
+
+		_ = tracker.Create(pvcGVR, fresh, testNS) //nolint: errcheck
+
+		return true, nil, nil
+	})
+
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    "pve-2",
+		TargetStorage: "zfs",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, deletes, "the migrator must delete the racing PVC so the owner recreates it once more")
+
+	_, err = kclient.CoreV1().PersistentVolumes().Get(context.Background(), racingPVName, metav1.GetOptions{})
+	require.Error(t, err, "the racing fresh empty PV must be deleted")
+
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/zfs/"+disk, boundPV.Spec.CSI.VolumeHandle, "the second recreate must bind the re-reserved DATA PV, not an empty one")
+	assert.Equal(t, pinned, boundPV.Spec.StorageClassName)
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
+}
+
+func TestMigrateManagedPVCClassFlipFlopFailsLoudlyAfterCap(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Pathological owner: every observation of the recreated PVC reports a
+	// DIFFERENT pinned class, so no re-reservation can ever match. The
+	// adaptation is bounded: after two re-reservations the migration must fail
+	// loudly, with the data PV still reserved, Retain and Available.
+	disk := "vm-9999-pvc-exist"
+	registerCrossStorageMove(disk)
+
+	oldClass := "proxmox-old"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &oldClass
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = oldClass
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(),
+		newTestStorageClass("proxmox-old", "local-lvm", false),
+		newTestStorageClass("proxmox-new", "zfs", true))
+
+	pinnedA := "proxmox-pinned-a"
+
+	simulateControllerRecreate(kclient, func(fresh *corev1.PersistentVolumeClaim) {
+		fresh.Spec.StorageClassName = &pinnedA
+	})
+
+	// Flip the class the recreated PVC reports on every get: the reconciled
+	// reservation is always one class behind.
+	tracker := kclient.Tracker()
+	gets := 0
+
+	kclient.PrependReactor("get", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		ga, ok := action.(k8stesting.GetAction)
+		if !ok || ga.GetName() != testPVCName {
+			return false, nil, nil
+		}
+
+		obj, err := tracker.Get(pvcGVR, testNS, testPVCName)
+		if err != nil {
+			return false, nil, nil //nolint: nilerr
+		}
+
+		claim, ok := obj.(*corev1.PersistentVolumeClaim)
+		if !ok || claim.UID != "controller-recreated-uid" {
+			return false, nil, nil
+		}
+
+		claim = claim.DeepCopy()
+		gets++
+
+		flip := "proxmox-pinned-a"
+		if gets%2 == 0 {
+			flip = "proxmox-pinned-b"
+		}
+
+		claim.Spec.StorageClassName = &flip
+
+		return true, claim, nil
+	})
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    "pve-2",
+		TargetStorage: "zfs",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "after 2 re-reservations", "the adaptation must be bounded")
+	assert.ErrorIs(t, err, migrator.ErrInvalidTarget, "a capped class reconciliation must be terminal so the controller stops retrying")
+
+	// The data disk is still protected: its reserved PV exists, Retain, and
+	// carries the migrated volume handle.
+	reserved := reservedPV(tracker)
+	require.NotNil(t, reserved, "the reserved data PV must survive the bounded failure")
+	assert.Equal(t, testRegion+"/pve-2/zfs/"+disk, reserved.Spec.CSI.VolumeHandle)
+	assert.Equal(t, corev1.PersistentVolumeReclaimRetain, reserved.Spec.PersistentVolumeReclaimPolicy)
+	assert.Empty(t, reserved.Spec.ClaimRef.UID, "the surviving reservation must stay pre-bound (empty claimRef UID)")
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC, even while adapting")
+}
+
+// newClassQuota returns a ResourceQuota in the test namespace whose status
+// carries the given hard/used quantities.
+func newClassQuota(name string, hard, used corev1.ResourceList) *corev1.ResourceQuota {
+	return &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNS},
+		Spec:       corev1.ResourceQuotaSpec{Hard: hard},
+		Status:     corev1.ResourceQuotaStatus{Hard: hard, Used: used},
+	}
+}
+
+// runQuotaBlockedMigration drives a cross-storage migration (class change
+// proxmox-old -> proxmox-new) against the given namespace quota and asserts it
+// aborts BEFORE the old PVC is deleted.
+func runQuotaBlockedMigration(t *testing.T, quota *corev1.ResourceQuota) {
+	t.Helper()
+
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	disk := "vm-9999-pvc-exist"
+	registerCrossStorageMove(disk)
+
+	oldClass := "proxmox-old"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &oldClass
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = oldClass
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(), quota,
+		newTestStorageClass("proxmox-old", "local-lvm", false),
+		newTestStorageClass("proxmox-new", "zfs", true))
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    "pve-2",
+		TargetStorage: "zfs",
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, migrator.ErrInvalidTarget)
+	assert.Contains(t, err.Error(), "resourcequota")
+
+	// Nothing destructive happened: the old PVC is still present, still bound
+	// to the old PV, and no PVC delete was ever issued.
+	oldPVC, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testPVName, oldPVC.Spec.VolumeName, "the old PVC must remain bound to the old PV")
+
+	for _, a := range kclient.Actions() {
+		if a.GetVerb() == "delete" && a.GetResource().Resource == "persistentvolumeclaims" {
+			t.Errorf("the quota pre-flight must abort before any PVC delete, got %v", a)
+		}
+	}
+
+	_, err = kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	require.NoError(t, err, "the old PV must remain")
+}
+
+func TestMigrateCrossStorageQuotaBlocksBeforePVCDelete(t *testing.T) {
+	// The volume requests 5Gi; the target class quota leaves only 4Gi.
+	runQuotaBlockedMigration(t, newClassQuota("target-class-storage",
+		corev1.ResourceList{"proxmox-new.storageclass.storage.k8s.io/requests.storage": resource.MustParse("14Gi")},
+		corev1.ResourceList{"proxmox-new.storageclass.storage.k8s.io/requests.storage": resource.MustParse("10Gi")},
+	))
+}
+
+func TestMigrateCrossStorageQuotaClaimCountBlocksBeforePVCDelete(t *testing.T) {
+	// The target class quota has no PVC slots left.
+	runQuotaBlockedMigration(t, newClassQuota("target-class-count",
+		corev1.ResourceList{"proxmox-new.storageclass.storage.k8s.io/persistentvolumeclaims": resource.MustParse("2")},
+		corev1.ResourceList{"proxmox-new.storageclass.storage.k8s.io/persistentvolumeclaims": resource.MustParse("2")},
+	))
+}
+
+func TestMigrateCrossStorageQuotaWithHeadroomProceeds(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The target class quota leaves plenty of headroom (5Gi needed, 90Gi free
+	// and 3 of 5 claim slots left): the pre-flight must not block anything.
+	disk := "vm-9999-pvc-exist"
+	registerCrossStorageMove(disk)
+
+	oldClass := "proxmox-old"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &oldClass
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = oldClass
+
+	quota := newClassQuota("target-class-roomy",
+		corev1.ResourceList{
+			"proxmox-new.storageclass.storage.k8s.io/requests.storage":       resource.MustParse("100Gi"),
+			"proxmox-new.storageclass.storage.k8s.io/persistentvolumeclaims": resource.MustParse("5"),
+		},
+		corev1.ResourceList{
+			"proxmox-new.storageclass.storage.k8s.io/requests.storage":       resource.MustParse("10Gi"),
+			"proxmox-new.storageclass.storage.k8s.io/persistentvolumeclaims": resource.MustParse("2"),
+		})
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(), quota,
+		newTestStorageClass("proxmox-old", "local-lvm", false),
+		newTestStorageClass("proxmox-new", "zfs", true))
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:     testNS,
+		PVCName:       testPVCName,
+		TargetNode:    "pve-2",
+		TargetStorage: "zfs",
+	})
+	require.NoError(t, err)
+
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/zfs/"+disk, boundPV.Spec.CSI.VolumeHandle)
+	assert.Equal(t, "proxmox-new", boundPV.Spec.StorageClassName)
+}
+
+func TestMigrateIdleWFFCManagedPVCReservationSucceeds(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// An IDLE volume (no consumer pod) whose StorageClass is
+	// WaitForFirstConsumer: the managed owner recreates the PVC Pending, and
+	// with no consumer it never binds (binding is deferred to pod scheduling).
+	// The migrator must treat the intact reservation as SUCCESS instead of
+	// timing out — the reserved data PV binds when a consumer later schedules.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	wffc := storagev1.VolumeBindingWaitForFirstConsumer
+	sc := newTestStorageClass("proxmox-wffc", testStorage, false)
+	sc.VolumeBindingMode = &wffc
+
+	class := "proxmox-wffc"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &class
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = class
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(), sc)
+
+	simulateControllerRecreate(kclient, func(fresh *corev1.PersistentVolumeClaim) {
+		fresh.Spec.StorageClassName = &class
+	})
+	// Deliberately NO simulateClaimRefBinder: a WFFC claim with no consumer
+	// stays Pending forever, yet the migrator must still succeed.
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err, "an idle WaitForFirstConsumer PVC must not fail the migration")
+
+	// The reserved data PV survives, carrying the moved handle, still pre-bound
+	// (empty claimRef UID) so it binds when a consumer schedules.
+	reserved := reservedPV(kclient.Tracker())
+	require.NotNil(t, reserved, "the reserved data PV must survive to bind a future consumer")
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, reserved.Spec.CSI.VolumeHandle)
+	require.NotNil(t, reserved.Spec.ClaimRef)
+	assert.Empty(t, reserved.Spec.ClaimRef.UID, "the reservation stays pre-bound until a consumer schedules")
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
+}
+
+func TestMigrateResumeReusesExistingReservation(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// A previous interrupted attempt already moved the disk and left a
+	// reservation (Retain, Available, claimRef to the PVC, target-zone handle).
+	// The resumed migration must ADOPT that reservation instead of creating a
+	// second Retain PV of the same disk.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	movedHandle := testRegion + "/pve-2/" + testStorage + "/" + disk
+
+	existing := newPV(disk, nil)
+	existing.Name = "pvc-existing-reservation"
+	existing.Spec.CSI.VolumeHandle = movedHandle
+	existing.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+	existing.Spec.ClaimRef = &corev1.ObjectReference{
+		Kind:       "PersistentVolumeClaim",
+		APIVersion: "v1",
+		Namespace:  testNS,
+		Name:       testPVCName,
+	}
+	existing.Status.Phase = corev1.VolumeAvailable
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), existing, newNode(), newCSINode())
+
+	simulateControllerRecreate(kclient)
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+
+	// Exactly one PV carries the moved handle, and it is the pre-existing
+	// reservation — no duplicate was created.
+	pvs, err := kclient.CoreV1().PersistentVolumes().List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+
+	matching := []string{}
+
+	for i := range pvs.Items {
+		if pvs.Items[i].Spec.CSI != nil && pvs.Items[i].Spec.CSI.VolumeHandle == movedHandle {
+			matching = append(matching, pvs.Items[i].Name)
+		}
+	}
+
+	require.Len(t, matching, 1, "the resume must reuse the existing reservation, not create a duplicate")
+	assert.Equal(t, "pvc-existing-reservation", matching[0])
+
+	// And no reserved PV was ever CREATED for the moved disk during this run.
+	for _, a := range kclient.Actions() {
+		if a.GetVerb() != "create" || a.GetResource().Resource != "persistentvolumes" {
+			continue
+		}
+
+		ca, ok := a.(k8stesting.CreateAction)
+		if !ok {
+			continue
+		}
+
+		created, ok := ca.GetObject().(*corev1.PersistentVolume)
+		if ok && created.Spec.CSI != nil && created.Spec.CSI.VolumeHandle == movedHandle {
+			t.Errorf("a duplicate reserved PV was created for the moved disk: %s", created.Name)
+		}
+	}
 }

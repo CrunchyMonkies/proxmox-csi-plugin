@@ -13,6 +13,12 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list"]
+  # Cross-storage target selection and the rewire's StorageClass alignment list
+  # the driver's StorageClasses to learn which Proxmox storages hold CSI volumes
+  # (list only: no get, no watch/informer)
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["list"]
   # Recreate PV/PVC with the new topology
   - apiGroups: [""]
     resources: ["persistentvolumes"]
@@ -20,6 +26,11 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # Target-class quota pre-flight: before the rewire deletes the old PVC, the
+  # migrator lists the namespace ResourceQuotas for headroom on the new class
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["list"]
   # Node cordoning/uncordoning and evacuation annotations
   - apiGroups: [""]
     resources: ["nodes"]

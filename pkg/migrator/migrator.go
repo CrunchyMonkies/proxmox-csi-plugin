@@ -446,8 +446,10 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 	m.phase(PhaseRewiring)
 	m.logf("replacing persistentvolume topology")
 
+	// %w: rewire failures keep their sentinel (the quota pre-flight aborts with
+	// ErrInvalidTarget so the controller can classify it as terminal).
 	if err = m.replacePVTopology(ctx, req.Namespace, kubePVC, kubePV, targetVol); err != nil {
-		return fmt.Errorf("failed to replace PV topology: %v", err)
+		return fmt.Errorf("failed to replace PV topology: %w", err)
 	}
 
 	// The migration is fully committed: the new PV is bound to the moved disk and

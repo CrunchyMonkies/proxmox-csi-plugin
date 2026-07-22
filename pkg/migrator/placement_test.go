@@ -17,12 +17,22 @@ limitations under the License.
 package migrator_test
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
+	"github.com/jarcoal/httpmock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/migrator"
+	testcluster "github.com/sergelogvinov/proxmox-csi-plugin/test/cluster"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 const gib = int64(1024 * 1024 * 1024)
@@ -67,6 +77,113 @@ func TestSelectTarget(t *testing.T) {
 			assert.Equal(t, tt.expected, target)
 		})
 	}
+}
+
+func TestSelectCrossStorageTarget(t *testing.T) {
+	t.Parallel()
+
+	// Per-zone storage names: storA exists only in the source zone, storB
+	// (the default StorageClass's storage) in zoneB, storC in zoneC with the
+	// most free space, and storA2 hosts the source storage name in zoneD.
+	candidates := func(withSameName bool) *migrator.StorageCandidates {
+		c := &migrator.StorageCandidates{
+			Capacities: map[string][]migrator.ZoneCapacity{
+				"storA": {{Zone: "zoneA", Avail: 100 * gib, Total: 200 * gib}},
+				"storB": {{Zone: "zoneB", Avail: 50 * gib, Total: 200 * gib}},
+				"storC": {{Zone: "zoneC", Avail: 80 * gib, Total: 200 * gib}},
+			},
+			DefaultStorage: "storB",
+		}
+		if withSameName {
+			c.Capacities["storA"] = append(c.Capacities["storA"], migrator.ZoneCapacity{Zone: "zoneD", Avail: 20 * gib, Total: 200 * gib})
+		}
+
+		return c
+	}
+
+	t.Run("same storage name in another zone is preferred", func(t *testing.T) {
+		t.Parallel()
+
+		zone, storage, err := migrator.SelectCrossStorageTarget(candidates(true), "zoneA", "storA", 5*gib, 0.15)
+		require.NoError(t, err)
+		assert.Equal(t, "zoneD", zone, "the zone hosting the source storage name wins even with less free space")
+		assert.Equal(t, "storA", storage)
+	})
+
+	t.Run("default StorageClass storage when the same name is absent", func(t *testing.T) {
+		t.Parallel()
+
+		zone, storage, err := migrator.SelectCrossStorageTarget(candidates(false), "zoneA", "storA", 5*gib, 0.15)
+		require.NoError(t, err)
+		assert.Equal(t, "zoneB", zone, "the default class's storage wins over a roomier non-default one")
+		assert.Equal(t, "storB", storage)
+	})
+
+	t.Run("headroom skips the default storage to a roomier blessed one", func(t *testing.T) {
+		t.Parallel()
+
+		// 45Gi * 1.15 = 51.75Gi: storB's 50Gi fails the headroom, storC fits.
+		zone, storage, err := migrator.SelectCrossStorageTarget(candidates(false), "zoneA", "storA", 45*gib, 0.15)
+		require.NoError(t, err)
+		assert.Equal(t, "zoneC", zone)
+		assert.Equal(t, "storC", storage)
+	})
+
+	t.Run("no candidate fits", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := migrator.SelectCrossStorageTarget(candidates(true), "zoneA", "storA", 500*gib, 0.15)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, migrator.ErrInvalidTarget)
+		assert.Contains(t, err.Error(), "storB", "the error must name the considered storages")
+	})
+
+	t.Run("source zone is never a target", func(t *testing.T) {
+		t.Parallel()
+
+		c := &migrator.StorageCandidates{
+			Capacities: map[string][]migrator.ZoneCapacity{
+				"storA": {{Zone: "zoneA", Avail: 100 * gib, Total: 200 * gib}},
+			},
+		}
+
+		_, _, err := migrator.SelectCrossStorageTarget(c, "zoneA", "storA", 5*gib, 0.15)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, migrator.ErrInvalidTarget)
+	})
+}
+
+func TestStorageForZone(t *testing.T) {
+	t.Parallel()
+
+	c := &migrator.StorageCandidates{
+		Capacities: map[string][]migrator.ZoneCapacity{
+			"storA": {{Zone: "zoneA", Avail: 100 * gib, Total: 200 * gib}},
+			"storB": {{Zone: "zoneB", Avail: 50 * gib, Total: 200 * gib}},
+			"storC": {{Zone: "zoneB", Avail: 80 * gib, Total: 200 * gib}, {Zone: "zoneC", Avail: 80 * gib, Total: 200 * gib}},
+		},
+		DefaultStorage: "storB",
+	}
+
+	// The explicit target zone hosts the source storage name: no override.
+	storage, err := c.StorageForZone("zoneA", "storA")
+	require.NoError(t, err)
+	assert.Empty(t, storage)
+
+	// The default class's storage wins on a zone hosting several candidates.
+	storage, err = c.StorageForZone("zoneB", "storA")
+	require.NoError(t, err)
+	assert.Equal(t, "storB", storage)
+
+	// Otherwise the blessed storage with the most free space on the zone.
+	storage, err = c.StorageForZone("zoneC", "storA")
+	require.NoError(t, err)
+	assert.Equal(t, "storC", storage)
+
+	// No candidate storage on the zone at all.
+	_, err = c.StorageForZone("zoneX", "storA")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, migrator.ErrInvalidTarget)
 }
 
 func TestPlan(t *testing.T) {
@@ -135,4 +252,56 @@ func TestPlanBalancedClusterDoesNothing(t *testing.T) {
 
 	moves := migrator.Plan(zones, vols, 0.80, 0.60, 0.15, 10)
 	assert.Empty(t, moves)
+}
+
+// TestGatherStorageCandidatesNewestDefaultWins is sequential (httpmock is
+// process-global; the parallel placement tests above resume only after the
+// sequential pass completes).
+func TestGatherStorageCandidatesNewestDefaultWins(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Two default StorageClasses: Kubernetes admission gives new PVCs the
+	// NEWEST by creationTimestamp, so DefaultStorage must follow it. The newer
+	// one is listed FIRST, which a last-in-list selection would get wrong.
+	older := newTestStorageClass("default-old", "zfs", true)
+	older.CreationTimestamp = metav1.NewTime(time.Now().Add(-2 * time.Hour))
+
+	newer := newTestStorageClass("default-new", "rbd", true)
+	newer.CreationTimestamp = metav1.NewTime(time.Now().Add(-1 * time.Hour))
+
+	kclient := fake.NewClientset(newer, older)
+
+	cluster, err := newProxmoxPool(t).GetProxmoxCluster(testRegion)
+	require.NoError(t, err)
+
+	candidates, err := migrator.GatherStorageCandidates(context.Background(), cluster, kclient, "local-lvm")
+	require.NoError(t, err)
+	assert.Equal(t, "rbd", candidates.DefaultStorage, "the newest default StorageClass must win, matching admission defaulting")
+}
+
+// TestGatherStorageCandidatesDegradesOnStorageClassListError proves that a
+// denied storageclasses list (an image-before-RBAC upgrade skew) degrades to
+// the source storage only instead of failing, so same-storage-name evacuation
+// keeps working. Sequential for the same httpmock reason as above.
+func TestGatherStorageCandidatesDegradesOnStorageClassListError(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	kclient := fake.NewClientset()
+	kclient.PrependReactor("list", "storageclasses", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("forbidden: cannot list storageclasses")
+	})
+
+	cluster, err := newProxmoxPool(t).GetProxmoxCluster(testRegion)
+	require.NoError(t, err)
+
+	candidates, err := migrator.GatherStorageCandidates(context.Background(), cluster, kclient, "local-lvm")
+	require.NoError(t, err, "a denied storageclasses list must degrade gracefully, not fail")
+	assert.Empty(t, candidates.DefaultStorage, "no default storage is available without the storageclasses read")
+	assert.Contains(t, candidates.Capacities, "local-lvm", "the source storage stays a candidate so same-storage-name evacuation still works")
 }

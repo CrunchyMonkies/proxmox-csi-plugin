@@ -223,7 +223,7 @@ func (c *rebalanceCmd) runRebalance(cmd *cobra.Command, _ []string) error {
 		logger.Infof("requesting migration %d/%d: %s/%s %s -> %s", i+1, len(moves), m.Namespace, m.PVCName, m.Source, m.Target)
 
 		// Rebalance never force-drains: only idle volumes are planned.
-		if err := annotatePVCMigration(ctx, c.kclient, m.Namespace, m.PVCName, m.Target, false); err != nil {
+		if err := annotatePVCMigration(ctx, c.kclient, m.Namespace, m.PVCName, m.Target, "", false); err != nil {
 			return err
 		}
 	}

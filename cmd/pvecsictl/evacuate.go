@@ -44,14 +44,18 @@ type evacuateCmd struct {
 	regions []string
 }
 
-// evacuateMove is one planned PVC evacuation.
+// evacuateMove is one planned PVC evacuation. targetStorage is empty when the
+// volume keeps its storage name on the target zone; it carries the blessed
+// (StorageClass-named) storage when the target zone does not host the source
+// storage name.
 type evacuateMove struct {
-	pv      *corev1.PersistentVolume
-	pvcNS   string
-	pvcName string
-	storage string
-	size    int64
-	target  string
+	pv            *corev1.PersistentVolume
+	pvcNS         string
+	pvcName       string
+	storage       string
+	targetStorage string
+	size          int64
+	target        string
 }
 
 func buildEvacuateCmd() *cobra.Command {
@@ -124,7 +128,10 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 			return err
 		}
 
-		capacities := map[string][]migrator.ZoneCapacity{}
+		// Cross-storage-aware candidates per source storage: the storages named
+		// by the driver's StorageClasses, so a cluster whose zones use different
+		// storage names still yields a target.
+		candidates := map[string]*migrator.StorageCandidates{}
 
 		for i := range pvs {
 			pv := &pvs[i]
@@ -142,32 +149,49 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 
 			size := pv.Spec.Capacity[corev1.ResourceStorage]
 
-			pvcTarget := target
-			if pvcTarget == "" {
-				if _, ok := capacities[vol.Storage()]; !ok {
-					zones, err := migrator.ZoneCapacities(ctx, cluster, vol.Storage())
-					if err != nil {
-						return fmt.Errorf("failed to get capacities for storage %s: %v", vol.Storage(), err)
-					}
-
-					capacities[vol.Storage()] = zones
+			if _, ok := candidates[vol.Storage()]; !ok {
+				cands, cerr := migrator.GatherStorageCandidates(ctx, cluster, c.kclient, vol.Storage())
+				if cerr != nil {
+					return fmt.Errorf("failed to get candidate capacities for storage %s: %v", vol.Storage(), cerr)
 				}
 
-				pvcTarget, err = migrator.SelectTarget(capacities[vol.Storage()], []string{zone}, size.Value(), headroom)
+				candidates[vol.Storage()] = cands
+			}
+
+			pvcTarget := target
+
+			var pvcStorage string
+
+			if pvcTarget == "" {
+				pvcTarget, pvcStorage, err = migrator.SelectCrossStorageTarget(candidates[vol.Storage()], zone, vol.Storage(), size.Value(), headroom)
 				if err != nil {
 					logger.Errorf("no evacuation target for %s/%s (storage %s): %v", pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name, vol.Storage(), err)
 
 					continue
 				}
+			} else {
+				// Explicit target node: when it does not host the source storage
+				// name, resolve the storage the same blessed-StorageClass way.
+				pvcStorage, err = candidates[vol.Storage()].StorageForZone(pvcTarget, vol.Storage())
+				if err != nil {
+					logger.Errorf("no storage on target %s for %s/%s (storage %s): %v", pvcTarget, pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name, vol.Storage(), err)
+
+					continue
+				}
+			}
+
+			if pvcStorage == vol.Storage() {
+				pvcStorage = ""
 			}
 
 			moves = append(moves, evacuateMove{
-				pv:      pv,
-				pvcNS:   pv.Spec.ClaimRef.Namespace,
-				pvcName: pv.Spec.ClaimRef.Name,
-				storage: vol.Storage(),
-				size:    size.Value(),
-				target:  pvcTarget,
+				pv:            pv,
+				pvcNS:         pv.Spec.ClaimRef.Namespace,
+				pvcName:       pv.Spec.ClaimRef.Name,
+				storage:       vol.Storage(),
+				targetStorage: pvcStorage,
+				size:          size.Value(),
+				target:        pvcTarget,
 			})
 		}
 	}
@@ -182,7 +206,12 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%-40s %-10s %-12s %-12s %s\n", "PVC", "SIZE", "SOURCE", "TARGET", "STORAGE")
 
 		for _, m := range moves {
-			fmt.Printf("%-40s %-10d %-12s %-12s %s\n", m.pvcNS+"/"+m.pvcName, m.size, zone, m.target, m.storage)
+			storage := m.storage
+			if m.targetStorage != "" {
+				storage = m.storage + " -> " + m.targetStorage
+			}
+
+			fmt.Printf("%-40s %-10d %-12s %-12s %s\n", m.pvcNS+"/"+m.pvcName, m.size, zone, m.target, storage)
 		}
 
 		return nil
@@ -194,7 +223,7 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 		for i, m := range moves {
 			logger.Infof("requesting migration %d/%d: %s/%s %s -> %s", i+1, len(moves), m.pvcNS, m.pvcName, zone, m.target)
 
-			if err := annotatePVCMigration(ctx, c.kclient, m.pvcNS, m.pvcName, m.target, force); err != nil {
+			if err := annotatePVCMigration(ctx, c.kclient, m.pvcNS, m.pvcName, m.target, m.targetStorage, force); err != nil {
 				return err
 			}
 		}
@@ -219,11 +248,12 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 		logger.Infof("evacuating %d/%d: %s/%s %s -> %s", i+1, len(moves), move.pvcNS, move.pvcName, zone, move.target)
 
 		err := m.Migrate(ctx, migrator.Request{
-			Namespace:   move.pvcNS,
-			PVCName:     move.pvcName,
-			TargetNode:  move.target,
-			Force:       force,
-			TaskTimeout: taskTimeout,
+			Namespace:     move.pvcNS,
+			PVCName:       move.pvcName,
+			TargetNode:    move.target,
+			TargetStorage: move.targetStorage,
+			Force:         force,
+			TaskTimeout:   taskTimeout,
 		})
 		if errors.Is(err, migrator.ErrSharedStorage) {
 			logger.Infof("skipping %s/%s: %v", move.pvcNS, move.pvcName, err)
@@ -248,10 +278,16 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 }
 
 // annotatePVCMigration stamps the migration request annotations on a PVC.
-func annotatePVCMigration(ctx context.Context, kclient clientkubernetes.Interface, namespace, name, target string, force bool) error {
+// targetStorage is optional: when set, the volume also moves into that storage
+// on the target zone (cross-storage migration).
+func annotatePVCMigration(ctx context.Context, kclient clientkubernetes.Interface, namespace, name, target, targetStorage string, force bool) error {
 	annotations := map[string]string{
 		migrator.AnnotationMigrateNode: target,
 	}
+	if targetStorage != "" {
+		annotations[migrator.AnnotationMigrateStorage] = targetStorage
+	}
+
 	if force {
 		annotations[migrator.AnnotationMigrateForce] = "true"
 	}
@@ -313,6 +349,8 @@ func (c *evacuateCmd) evacuateValidate(cmd *cobra.Command, _ []string) error {
 	accessCheck := []rbacv1.ResourceAttributes{
 		{Group: "", Namespace: "", Resource: "persistentvolumes", Verb: "list"},
 		{Group: "", Namespace: "", Resource: "persistentvolumeclaims", Verb: "patch"},
+		// Cross-storage target selection reads the driver's StorageClasses.
+		{Group: "storage.k8s.io", Namespace: "", Resource: "storageclasses", Verb: "list"},
 	}
 
 	if now, _ := flags.GetBool("now"); now { //nolint: errcheck
@@ -323,6 +361,9 @@ func (c *evacuateCmd) evacuateValidate(cmd *cobra.Command, _ []string) error {
 			rbacv1.ResourceAttributes{Group: "", Namespace: "", Resource: "persistentvolumes", Verb: "delete"},
 			rbacv1.ResourceAttributes{Group: "", Namespace: "", Resource: "pods", Verb: "delete"},
 			rbacv1.ResourceAttributes{Group: "", Namespace: "", Resource: "nodes", Verb: "patch"},
+			// The --now path runs Migrate, whose rewire lists namespace
+			// ResourceQuotas for the target-class quota pre-flight.
+			rbacv1.ResourceAttributes{Group: "", Namespace: "", Resource: "resourcequotas", Verb: "list"},
 		)
 	}
 
