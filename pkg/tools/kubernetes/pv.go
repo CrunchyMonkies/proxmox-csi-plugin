@@ -100,6 +100,36 @@ func PVCPodPlacement(ctx context.Context, clientset clientkubernetes.Interface, 
 	return placement, nil
 }
 
+// PVCConsumers returns the names of the pods that reference the
+// PersistentVolumeClaim and are not terminal (Succeeded/Failed). Unlike
+// PVCPodUsage it COUNTS Pending pods — including still-unscheduled ones — because
+// a Pending consumer is exactly what triggers WaitForFirstConsumer binding, so it
+// must not be mistaken for an idle, consumer-less volume.
+func PVCConsumers(ctx context.Context, clientset clientkubernetes.Interface, namespace, pvcName string) ([]string, error) {
+	podList, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods: %v", err)
+	}
+
+	consumers := []string{}
+
+	for _, pod := range podList.Items {
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+
+		for _, volume := range pod.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == pvcName {
+				consumers = append(consumers, pod.Name)
+
+				break
+			}
+		}
+	}
+
+	return consumers, nil
+}
+
 // PVCCreateOrUpdate creates or updates the specified PersistentVolumeClaim resource.
 func PVCCreateOrUpdate(
 	ctx context.Context,

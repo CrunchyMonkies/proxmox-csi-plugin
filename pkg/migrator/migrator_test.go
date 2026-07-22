@@ -308,6 +308,7 @@ func TestMigrateSuccess(t *testing.T) {
 	pv := newPV(disk, nil)
 
 	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -381,6 +382,7 @@ func TestMigrateSuccessTokenCopyEndpoint(t *testing.T) {
 		}))
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t), TokenCopyEndpoint: true}
 
@@ -483,6 +485,7 @@ func TestMigrateCrossStorage(t *testing.T) {
 	registerTargetContent("pve-2", "zfs", "zfs:"+disk)
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -566,6 +569,7 @@ func TestMigrateSameNodeCrossStorage(t *testing.T) {
 		})
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -599,6 +603,7 @@ func TestMigrateReclaimsSourceDiskOnSuccess(t *testing.T) {
 	registerMoveResponder(disk, "local-lvm:"+disk)
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	sourceDeleted := false
 	boundAtDelete := false
@@ -753,6 +758,7 @@ func TestMigrateSameNodeCrossStorageReclaimsSourceStorage(t *testing.T) {
 		}))
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -971,6 +977,7 @@ func TestMigrateForceForeignProviderIDFallsBackToVMLookup(t *testing.T) {
 	registerMoveResponder(disk, "local-lvm:"+disk)
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newForeignNode("11833f4c-341f-4bd3-aad7-f7abed000000"), newCSINode(), newPod())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -1041,6 +1048,7 @@ func TestMigrateForceForeignProviderIDFallsBackToUUIDLookup(t *testing.T) {
 	pod.Spec.NodeName = "k8s-worker-a"
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), node, csiNode, pod)
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -1225,6 +1233,7 @@ func TestMigrateResumePartialDiskRedoesMove(t *testing.T) {
 	pv := newPV(disk, map[string]string{migrator.AnnotationMigrateState: "pve-2"})
 
 	kclient := fake.NewClientset(newPVC(nil), pv, newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -1341,6 +1350,7 @@ func TestMigrateQcow2ConvertAndMove(t *testing.T) {
 	}
 
 	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -1460,6 +1470,7 @@ func TestMigrateResumeSkipsMove(t *testing.T) {
 	pv := newPV(disk, map[string]string{migrator.AnnotationMigrateState: "pve-2"})
 
 	kclient := fake.NewClientset(newPVC(nil), pv, newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -1549,12 +1560,26 @@ func pvcStorageClass(pvc *corev1.PersistentVolumeClaim) string {
 	return *pvc.Spec.StorageClassName
 }
 
-// simulateClaimRefBinder installs a get reactor that binds a still-Pending test
-// PVC to the migrator's reserved PV — the Kubernetes binder honoring the
-// empty-UID claimRef reservation. Like the real binder it refuses a PV whose
-// storageClassName differs from the PVC's, so tests prove the reserved PV
-// carries a bindable class. It mutates the tracker directly, so it never
-// appears as a PVC update action.
+// simulateClaimRefBinder installs a get reactor that models the Kubernetes PV
+// binder with REAL apiserver semantics, so a regression cannot slip past it. It
+// mutates the tracker directly, so a simulated bind never appears as a PVC
+// update action. The three modeled cases mirror what a live apiserver does:
+//
+//   - A still-Pending PVC WITHOUT spec.volumeName whose reserved PV exists (an
+//     empty-UID claimRef to this namespace/name and a matching storageClassName)
+//     BINDS via the reservation: the PV.claimRef.UID is populated with the PVC's
+//     UID, the PVC's spec.volumeName is set to the reserved PV, and both are
+//     marked Bound. This is the claimRef-only reservation path the migrator relies
+//     on for BOTH the unmanaged (migrator create) and managed (owner recreate)
+//     cases — neither carries a volumeName.
+//   - A PVC created WITH spec.volumeName alongside a reserved PV whose claimRef
+//     still has an EMPTY UID is the buggy "double pre-bind": a live apiserver
+//     leaves the PVC Lost and the PV Available (UID never populated), so the
+//     binder does NOT complete it. Reintroducing volumeName in the migrator
+//     therefore fails to bind here.
+//   - A PVC WITH spec.volumeName pointing at a foreign PV whose claimRef already
+//     carries a NON-empty UID that differs from the PVC's (a racing bind) is not
+//     the reservation completing either, and is left untouched.
 func simulateClaimRefBinder(kclient *fake.Clientset) {
 	tracker := kclient.Tracker()
 
@@ -1576,16 +1601,44 @@ func simulateClaimRefBinder(kclient *fake.Clientset) {
 
 		claim = claim.DeepCopy()
 
-		if claim.Spec.VolumeName == "" {
-			if reserved := reservedPV(tracker); reserved != nil && reserved.Spec.StorageClassName == pvcStorageClass(claim) {
-				claim.Spec.VolumeName = reserved.Name
-				claim.Status.Phase = corev1.ClaimBound
-				_ = tracker.Update(pvcGVR, claim, testNS) //nolint: errcheck
-			}
+		// Only a still-Pending claim WITHOUT a volumeName is completable via the
+		// reservation. A volumeName already set — whether the buggy double
+		// pre-bind (reserved PV, empty-UID claimRef) or a racing bind to a
+		// foreign, already-claimed PV — is exactly what a live apiserver refuses
+		// to turn into a reservation bind, so it is returned as-is (unbound).
+		if claim.Spec.VolumeName == "" && claim.Status.Phase != corev1.ClaimBound {
+			bindReservation(tracker, claim)
 		}
 
 		return true, claim, nil
 	})
+}
+
+// bindReservation binds the claim to its reserved PV when one exists (an
+// empty-UID claimRef to the claim's namespace/name and a matching
+// storageClassName), replicating the apiserver: the PV.claimRef.UID is populated
+// with the claim's UID and both the PV and PVC are marked Bound. It mutates the
+// tracker in place; a claim with no matching reservation is left unbound.
+func bindReservation(tracker k8stesting.ObjectTracker, claim *corev1.PersistentVolumeClaim) {
+	reserved := reservedPV(tracker)
+	if reserved == nil || reserved.Spec.StorageClassName != pvcStorageClass(claim) {
+		return
+	}
+
+	// Only an empty-UID claimRef that targets THIS claim is a reservation the
+	// binder completes; a populated UID means the PV is already bound.
+	if ref := reserved.Spec.ClaimRef; ref == nil || ref.UID != "" || ref.Namespace != testNS || ref.Name != claim.Name {
+		return
+	}
+
+	reserved = reserved.DeepCopy()
+	reserved.Spec.ClaimRef.UID = claim.UID
+	reserved.Status.Phase = corev1.VolumeBound
+	_ = tracker.Update(pvGVR, reserved, "") //nolint: errcheck
+
+	claim.Spec.VolumeName = reserved.Name
+	claim.Status.Phase = corev1.ClaimBound
+	_ = tracker.Update(pvcGVR, claim, testNS) //nolint: errcheck
 }
 
 // assertRetainedBeforeDelete asserts the old PV was patched to Retain before it
@@ -1650,7 +1703,7 @@ func TestMigrateManagedPVCRecreatedBindsReservedPV(t *testing.T) {
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle, "PVC must bind to the reserved data PV, preserving the moved volume handle")
 	require.NotNil(t, newPV.Spec.ClaimRef)
 	assert.Equal(t, testPVCName, newPV.Spec.ClaimRef.Name)
-	assert.Empty(t, newPV.Spec.ClaimRef.UID, "the reservation claimRef UID must be empty")
+	assert.Equal(t, "controller-recreated-uid", string(newPV.Spec.ClaimRef.UID), "a completed bind populates the reservation's claimRef UID with the recreated PVC's UID")
 	assert.Equal(t, corev1.PersistentVolumeReclaimDelete, newPV.Spec.PersistentVolumeReclaimPolicy, "the reserved PV's reclaim policy must be restored after binding")
 
 	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
@@ -1663,9 +1716,10 @@ func TestMigrateUnmanagedPVCBindsReservedPV(t *testing.T) {
 
 	testcluster.SetupMockResponders()
 
-	// No controller recreates the PVC: the migrator creates it, pre-bound to the
-	// reserved PV. A Delete-policy source PV exercises the Retain guard and the
-	// reclaim-policy restore on the happy path too.
+	// No controller recreates the PVC: the migrator creates it WITHOUT a
+	// volumeName and the binder binds it via the reserved PV's claimRef. A
+	// Delete-policy source PV exercises the Retain guard and the reclaim-policy
+	// restore on the happy path too.
 	disk := "vm-9999-pvc-exist"
 	registerMoveResponder(disk, "local-lvm:"+disk)
 
@@ -1673,6 +1727,7 @@ func TestMigrateUnmanagedPVCBindsReservedPV(t *testing.T) {
 	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
 
 	kclient := fake.NewClientset(newPVC(nil), pv, newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -1686,11 +1741,147 @@ func TestMigrateUnmanagedPVCBindsReservedPV(t *testing.T) {
 	newPV := migratedPV(t, kclient)
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, newPV.Spec.CSI.VolumeHandle)
 	require.NotNil(t, newPV.Spec.ClaimRef)
-	assert.Empty(t, newPV.Spec.ClaimRef.UID, "the reservation claimRef UID must be empty")
+	assert.Equal(t, testPVCName, newPV.Spec.ClaimRef.Name, "the reserved PV's claimRef must target the recreated PVC")
 	assert.Equal(t, corev1.PersistentVolumeReclaimDelete, newPV.Spec.PersistentVolumeReclaimPolicy)
+
+	// The migrator's own recreate carries no volumeName; the binder set it.
+	boundPVC, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, newPV.Name, boundPVC.Spec.VolumeName, "the binder (not the migrator) populated the PVC's volumeName")
 
 	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
 	assertRetainedBeforeDelete(t, kclient)
+}
+
+// createdPVCs returns the PersistentVolumeClaims the migrator created through the
+// clientset (its own recreate attempts). A controller's recreate mutates the
+// tracker directly and never appears as a create action, so this isolates the
+// migrator's OWN recreated PVC.
+func createdPVCs(kclient *fake.Clientset) []*corev1.PersistentVolumeClaim {
+	var pvcs []*corev1.PersistentVolumeClaim
+
+	for _, a := range kclient.Actions() {
+		if a.GetVerb() != "create" || a.GetResource().Resource != "persistentvolumeclaims" {
+			continue
+		}
+
+		ca, ok := a.(k8stesting.CreateAction)
+		if !ok {
+			continue
+		}
+
+		if pvc, ok := ca.GetObject().(*corev1.PersistentVolumeClaim); ok {
+			pvcs = append(pvcs, pvc)
+		}
+	}
+
+	return pvcs
+}
+
+func TestMigrateRecreatedPVCHasNoVolumeNameBindsViaClaimRef(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The migrator must recreate the PVC WITHOUT a spec.volumeName: setting one
+	// alongside the reserved PV's empty-UID claimRef is the double pre-bind a live
+	// apiserver leaves Lost/Available. Binding must complete via the claimRef
+	// alone — the binder populates the PV.claimRef.UID and both go Bound.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	// A controller-recreated PVC carries a UID, so the completed bind has an
+	// observable claimRef UID to assert on.
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateControllerRecreate(kclient)
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+
+	// Every PVC the migrator itself created must carry an EMPTY volumeName —
+	// reintroducing a volumeName here is the regression this guards.
+	created := createdPVCs(kclient)
+	require.NotEmpty(t, created, "the migrator must have issued its own recreate")
+
+	for _, c := range created {
+		assert.Empty(t, c.Spec.VolumeName, "the migrator must never set spec.volumeName on the recreated PVC")
+	}
+
+	// Binding completed via the claimRef: the PVC is Bound to the reserved data
+	// PV, and the binder (not the migrator) populated both the PV.claimRef UID
+	// and the PVC's volumeName.
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, boundPV.Spec.CSI.VolumeHandle)
+	require.NotNil(t, boundPV.Spec.ClaimRef)
+	assert.Equal(t, testPVCName, boundPV.Spec.ClaimRef.Name)
+	assert.NotEmpty(t, boundPV.Spec.ClaimRef.UID, "a completed claimRef bind populates the PV.claimRef UID")
+	assert.Equal(t, corev1.VolumeBound, boundPV.Status.Phase, "the reserved PV must be Bound after the claimRef bind")
+
+	boundPVC, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, boundPV.Name, boundPVC.Spec.VolumeName)
+	assert.Equal(t, corev1.ClaimBound, boundPVC.Status.Phase)
+}
+
+func TestClaimRefBinderRefusesDoublePrebind(t *testing.T) {
+	// Invariant, pinned so a regression cannot pass: a PVC carrying a
+	// spec.volumeName that points at a reserved PV whose claimRef still has an
+	// EMPTY UID is the buggy double pre-bind. A live apiserver never completes it
+	// (PVC Lost, PV Available), and neither may the test binder — otherwise
+	// reintroducing volumeName in the migrator would silently pass. Clearing the
+	// volumeName (the correct claimRef-only shape) then lets the reservation bind.
+	reservedName := "pvc-reserved-data"
+
+	reserved := newPV("vm-9999-pvc-exist", nil)
+	reserved.Name = reservedName
+	reserved.Spec.ClaimRef = &corev1.ObjectReference{
+		Kind:       "PersistentVolumeClaim",
+		APIVersion: "v1",
+		Namespace:  testNS,
+		Name:       testPVCName,
+		// EMPTY UID: an unbound reservation.
+	}
+
+	// Buggily created WITH the volumeName already set (the double pre-bind).
+	pvc := newPVC(nil)
+	pvc.Spec.VolumeName = reservedName
+	pvc.UID = "double-prebind-uid"
+	pvc.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
+
+	kclient := fake.NewClientset(pvc, reserved)
+	simulateClaimRefBinder(kclient)
+
+	got, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotEqual(t, corev1.ClaimBound, got.Status.Phase, "a double pre-bind must not be marked Bound")
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), reservedName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, pv.Spec.ClaimRef)
+	assert.Empty(t, pv.Spec.ClaimRef.UID, "the reservation's claimRef UID must stay empty for a double pre-bind")
+
+	// The correct shape: no volumeName. The reservation now binds.
+	cleared := got.DeepCopy()
+	cleared.Spec.VolumeName = ""
+	_, err = kclient.CoreV1().PersistentVolumeClaims(testNS).Update(context.Background(), cleared, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	bound, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, corev1.ClaimBound, bound.Status.Phase, "a claimRef-only PVC must bind the reservation")
+	assert.Equal(t, reservedName, bound.Spec.VolumeName)
+
+	pv, err = kclient.CoreV1().PersistentVolumes().Get(context.Background(), reservedName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "double-prebind-uid", string(pv.Spec.ClaimRef.UID), "the completed reservation populates the PV.claimRef UID")
 }
 
 func TestMigrateManagedPVCReboundToDifferentPVFails(t *testing.T) {
@@ -1872,6 +2063,7 @@ func TestMigrateCrossStorageAmbiguousClassKeepsOldClass(t *testing.T) {
 	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(),
 		newTestStorageClass("proxmox-new-1", "zfs", true),
 		newTestStorageClass("proxmox-new-2", "zfs", false))
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -2247,6 +2439,7 @@ func TestMigrateCrossStorageQuotaWithHeadroomProceeds(t *testing.T) {
 	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(), quota,
 		newTestStorageClass("proxmox-old", "local-lvm", false),
 		newTestStorageClass("proxmox-new", "zfs", true))
+	simulateClaimRefBinder(kclient)
 
 	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
 
@@ -2313,6 +2506,66 @@ func TestMigrateIdleWFFCManagedPVCReservationSucceeds(t *testing.T) {
 	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, reserved.Spec.CSI.VolumeHandle)
 	require.NotNil(t, reserved.Spec.ClaimRef)
 	assert.Empty(t, reserved.Spec.ClaimRef.UID, "the reservation stays pre-bound until a consumer schedules")
+	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
+}
+
+func TestMigrateWFFCPendingConsumerWaitsForRealBind(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// A WaitForFirstConsumer volume WITH a Pending consumer pod — the
+	// force-migration/reactive shape, where the workload's pod is Pending waiting
+	// for exactly this volume. The idle-WFFC success shortcut must NOT fire: a
+	// Pending consumer still counts, so the migrator waits for the REAL bind the
+	// scheduler drives instead of declaring premature success on an unbound PVC.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	wffc := storagev1.VolumeBindingWaitForFirstConsumer
+	sc := newTestStorageClass("proxmox-wffc", testStorage, false)
+	sc.VolumeBindingMode = &wffc
+
+	class := "proxmox-wffc"
+
+	pvc := newPVC(nil)
+	pvc.Spec.StorageClassName = &class
+
+	pv := newPV(disk, nil)
+	pv.Spec.StorageClassName = class
+
+	// A Pending consumer pod referencing the PVC. PVCPodUsage (the force-drain
+	// pre-flight) ignores Pending pods, so the migration is not force-drained;
+	// PVCConsumers counts it, so the WFFC reservation is not treated as idle.
+	pod := newPod()
+	pod.Status.Phase = corev1.PodPending
+
+	kclient := fake.NewClientset(pvc, pv, newNode(), newCSINode(), sc, pod)
+
+	simulateControllerRecreate(kclient, func(fresh *corev1.PersistentVolumeClaim) {
+		fresh.Spec.StorageClassName = &class
+	})
+	// The binder models the scheduler placing the Pending pod and completing the
+	// WFFC bind: the migrator must reach this real bind, not the idle shortcut.
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+
+	// The migrator waited for the REAL bind: the PVC is bound to the reserved
+	// data PV and the binder populated the PV.claimRef UID — proving it did not
+	// take the premature idle-WFFC shortcut (which leaves the PVC unbound).
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, boundPV.Spec.CSI.VolumeHandle)
+	require.NotNil(t, boundPV.Spec.ClaimRef)
+	assert.Equal(t, "controller-recreated-uid", string(boundPV.Spec.ClaimRef.UID), "the WFFC bind completed via the consumer, not the idle shortcut")
 	assert.Zero(t, countPVCUpdates(kclient), "the rewire must never update a PVC")
 }
 
