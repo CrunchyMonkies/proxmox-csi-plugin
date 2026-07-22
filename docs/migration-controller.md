@@ -11,6 +11,7 @@ flowchart LR
         ev[node evacuation annotation / pvecsictl evacuate]
         rb[rebalance CronJob]
         pf[pod-follow watcher]
+        re[reactive-evacuation watcher]
     end
     subgraph controller [Migration controller - single worker]
         q[workqueue] --> mig[pkg/migrator pipeline]
@@ -149,6 +150,25 @@ A migration is requested only when the pods have *settled*:
 
 Target storage selection: the volume's storage name if the pods' zone hosts it, else the cluster's `primary_storage` map (stamps `migrate-storage`), else a `FollowSkipped` warning event and no action. Pod-follow never force-drains: stuck pods are left in place and the attach retry succeeds after the rewire.
 
+### Reactive node evacuation (opt-in)
+
+With `--reactive-evacuation` (Helm: `migrator.reactiveEvacuation.enabled: true`), a standard **`kubectl drain <node>`** becomes transparent for zone-local proxmox-csi volumes. In this one-worker-per-zone model a volume can only attach on nodes in its own Proxmox zone, so a pod whose volume is pinned to the node you just drained cannot reschedule anywhere — the scheduler leaves it `Pending`/`Unschedulable`. The controller watches for exactly that condition and stamps a migration so the volume (and the pod) can move to a schedulable zone.
+
+Where pod-follow reacts to pods that have **already moved** (chasing a VM migration), reactive evacuation reacts to pods that **cannot move** because their volume is stuck on a cordoned node — it decides *when* a drain should trigger a migration.
+
+The trigger is deliberately narrow to avoid false positives. A migration is stamped only when **all** of these hold:
+
+1. The pod is `Pending` with condition `PodScheduled=False`, reason `Unschedulable` — the scheduler actually failed to place it.
+2. The pod references a PVC bound to a PV provisioned by this driver, whose zone maps to a node that is **cordoned** (`spec.unschedulable`) or carries a `NoSchedule`/`NoExecute` **taint**.
+3. **No schedulable node** satisfies the volume's zone — i.e. the pinned zone's node really is the drained one, not merely one of several. If a schedulable node in the zone exists, the pod is stuck for some other reason (e.g. insufficient resources) and nothing is done.
+4. The PVC is **not already mid-migration** (no `migrate-node` request and no in-flight `migrate-phase`).
+
+When all hold, the target zone is chosen by free capacity/headroom (the same `auto` selector as evacuation) and `migrate-node` + `migrate-force` are stamped on the PVC, emitting a `ReactiveEvacuation` event. If no target zone has capacity, a warning event is emitted and nothing is stamped (no thrashing).
+
+**Grace period.** To avoid turning a quick maintenance cordon+reboot into a large disk copy, the trigger waits a configurable grace period (`--reactive-evacuation-grace`, default `2m`) measured from the pod's `PodScheduled` transition time (falling back to the pod's creation time). While inside the window the pod is requeued and re-checked; it only fires once the pod has stayed unschedulable past the grace period. A cordon-only maintenance that evicts nothing (no `Pending` pod) never triggers; a real drain that leaves a pod stuck past the window does.
+
+**Scope.** Reactive evacuation only migrates **volumes**. `kubectl drain` still owns eviction of stateless pods and honoring PodDisruptionBudgets — this feature simply removes the volume as the thing that keeps a stateful pod pinned to the drained node. It is opt-in and off by default; when disabled, the pod watch and reconcile are inert.
+
 ### Controller flags
 
 | Flag | Default | Description |
@@ -156,6 +176,8 @@ Target storage selection: the volume's storage name if the pods' zone hosts it, 
 | `--config` | (required) | Proxmox cloud config with root credentials |
 | `--leader-election` | `true` | Use a `pvecsictl-migrator` Lease |
 | `--pod-follow` | `false` | Migrate volumes automatically when all their pods moved to another zone |
+| `--reactive-evacuation` | `false` | Migrate a volume when its pod is unschedulable because the volume is pinned to a cordoned/tainted node (makes `kubectl drain` transparent) |
+| `--reactive-evacuation-grace` | `2m` | How long a pod must stay unschedulable before reactive evacuation triggers |
 | `--helper-vmid` | `9998` | VM ID of the transient helper VM used to convert qcow2/vmdk volumes |
 | `--namespace` | `POD_NAMESPACE` or `kube-system` | Lease namespace |
 | `--max-attempts` | `5` | Attempts before a migration is marked `Failed` |
@@ -255,7 +277,7 @@ Tested against **Proxmox VE 9.2.3** (`pve-manager/9.2.3`, `libpve-storage-perl 9
 | qcow2 volume on `dir` storage (convert-and-move), round-trip, data verified | ✅ live (arrives as raw) |
 | Failed-move safety (task error, partial file, crash mid-move) | ✅ live + regression tests |
 | Shared-storage skip, invalid-target rejection, in-use skip | ✅ live + unit tests |
-| Node evacuation, pod-follow, rebalance planning | ✅ unit tests (evacuation annotation expansion verified live) |
+| Node evacuation, pod-follow, reactive evacuation, rebalance planning | ✅ unit tests (evacuation annotation expansion verified live) |
 | LVM / LVM-thin volumes via the copy path | unit tests only |
 | Multi-region configs, `primary_storage` cross-storage moves | unit tests only |
 

@@ -69,7 +69,21 @@ type Options struct {
 	// migration target storage when the volume's storage name does not exist
 	// on the pods' zone.
 	PrimaryStorage map[string]map[string]string
+
+	// ReactiveEvacuation makes a standard `kubectl drain` transparent for
+	// zone-local volumes: when a pod cannot be scheduled because its volume is
+	// pinned to a cordoned/tainted node, the controller stamps a migration so
+	// the pod can schedule elsewhere. Opt-in; inert when false.
+	ReactiveEvacuation bool
+	// ReactiveEvacuationGrace is how long a pod must stay unschedulable on a
+	// pinned volume before a reactive migration is stamped. This prevents a
+	// quick maintenance cordon+reboot from triggering a large copy.
+	ReactiveEvacuationGrace time.Duration
 }
+
+// DefaultReactiveEvacuationGrace is the default grace period before a reactive
+// evacuation migration is stamped.
+const DefaultReactiveEvacuationGrace = 2 * time.Minute
 
 // Controller is the annotation-driven migration controller.
 type Controller struct {
@@ -78,10 +92,11 @@ type Controller struct {
 	recorder record.EventRecorder
 	opts     Options
 
-	factory     informers.SharedInformerFactory
-	pvcQueue    workqueue.TypedRateLimitingInterface[string]
-	nodeQueue   workqueue.TypedRateLimitingInterface[string]
-	followQueue workqueue.TypedRateLimitingInterface[string]
+	factory       informers.SharedInformerFactory
+	pvcQueue      workqueue.TypedRateLimitingInterface[string]
+	nodeQueue     workqueue.TypedRateLimitingInterface[string]
+	followQueue   workqueue.TypedRateLimitingInterface[string]
+	reactiveQueue workqueue.TypedRateLimitingInterface[string]
 }
 
 // New creates a migration controller.
@@ -92,6 +107,10 @@ func New(kclient clientkubernetes.Interface, m *migrator.Migrator, recorder reco
 
 	if opts.Resync <= 0 {
 		opts.Resync = 10 * time.Minute
+	}
+
+	if opts.ReactiveEvacuationGrace <= 0 {
+		opts.ReactiveEvacuationGrace = DefaultReactiveEvacuationGrace
 	}
 
 	c := &Controller{
@@ -105,6 +124,8 @@ func New(kclient clientkubernetes.Interface, m *migrator.Migrator, recorder reco
 		nodeQueue: workqueue.NewTypedRateLimitingQueue(
 			workqueue.DefaultTypedControllerRateLimiter[string]()),
 		followQueue: workqueue.NewTypedRateLimitingQueue(
+			workqueue.DefaultTypedControllerRateLimiter[string]()),
+		reactiveQueue: workqueue.NewTypedRateLimitingQueue(
 			workqueue.DefaultTypedControllerRateLimiter[string]()),
 	}
 
@@ -124,14 +145,26 @@ func New(kclient clientkubernetes.Interface, m *migrator.Migrator, recorder reco
 		},
 	})
 
-	if opts.PodFollow {
+	if opts.PodFollow || opts.ReactiveEvacuation {
 		podInformer := c.factory.Core().V1().Pods().Informer()
-		_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{ //nolint: errcheck
-			AddFunc: c.enqueuePodPVCs,
-			UpdateFunc: func(_, newObj interface{}) {
-				c.enqueuePodPVCs(newObj)
-			},
-		})
+
+		if opts.PodFollow {
+			_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{ //nolint: errcheck
+				AddFunc: c.enqueuePodPVCs,
+				UpdateFunc: func(_, newObj interface{}) {
+					c.enqueuePodPVCs(newObj)
+				},
+			})
+		}
+
+		if opts.ReactiveEvacuation {
+			_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{ //nolint: errcheck
+				AddFunc: c.enqueueReactivePod,
+				UpdateFunc: func(_, newObj interface{}) {
+					c.enqueueReactivePod(newObj)
+				},
+			})
+		}
 	}
 
 	return c
@@ -145,6 +178,7 @@ func (c *Controller) Run(ctx context.Context) {
 	defer c.pvcQueue.ShutDown()
 	defer c.nodeQueue.ShutDown()
 	defer c.followQueue.ShutDown()
+	defer c.reactiveQueue.ShutDown()
 
 	klog.InfoS("Starting migration controller")
 
@@ -154,7 +188,7 @@ func (c *Controller) Run(ctx context.Context) {
 		c.factory.Core().V1().PersistentVolumeClaims().Informer().HasSynced,
 		c.factory.Core().V1().Nodes().Informer().HasSynced,
 	}
-	if c.opts.PodFollow {
+	if c.opts.PodFollow || c.opts.ReactiveEvacuation {
 		synced = append(synced, c.factory.Core().V1().Pods().Informer().HasSynced)
 	}
 
@@ -174,6 +208,11 @@ func (c *Controller) Run(ctx context.Context) {
 	if c.opts.PodFollow {
 		// The follow worker only stamps annotations, it never migrates.
 		go wait.UntilWithContext(ctx, c.followWorker, time.Second)
+	}
+
+	if c.opts.ReactiveEvacuation {
+		// The reactive worker only stamps annotations, it never migrates.
+		go wait.UntilWithContext(ctx, c.reactiveWorker, time.Second)
 	}
 
 	<-ctx.Done()
@@ -221,6 +260,28 @@ func (c *Controller) enqueuePodPVCs(obj interface{}) {
 	for _, volume := range pod.Spec.Volumes {
 		if volume.PersistentVolumeClaim != nil {
 			c.followQueue.Add(pod.Namespace + "/" + volume.PersistentVolumeClaim.ClaimName)
+		}
+	}
+}
+
+// enqueueReactivePod enqueues a Pending pod that the scheduler could not place
+// (PodScheduled=False, reason=Unschedulable) and that references a PVC, for
+// reactive-evacuation evaluation.
+func (c *Controller) enqueueReactivePod(obj interface{}) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return
+	}
+
+	if _, unschedulable := podUnschedulableSince(pod); !unschedulable {
+		return
+	}
+
+	for _, vol := range pod.Spec.Volumes {
+		if vol.PersistentVolumeClaim != nil {
+			c.reactiveQueue.Add(pod.Namespace + "/" + pod.Name)
+
+			return
 		}
 	}
 }
@@ -279,6 +340,25 @@ func (c *Controller) followWorker(ctx context.Context) {
 		}
 
 		c.followQueue.Done(key)
+	}
+}
+
+func (c *Controller) reactiveWorker(ctx context.Context) {
+	for {
+		key, quit := c.reactiveQueue.Get()
+		if quit {
+			return
+		}
+
+		err := c.reconcileReactivePod(ctx, key)
+		if err != nil {
+			klog.ErrorS(err, "Reactive evacuation evaluation failed, requeueing", "pod", key)
+			c.reactiveQueue.AddRateLimited(key)
+		} else {
+			c.reactiveQueue.Forget(key)
+		}
+
+		c.reactiveQueue.Done(key)
 	}
 }
 
@@ -643,6 +723,223 @@ func (c *Controller) reconcileFollow(ctx context.Context, key string) error {
 	}
 
 	return c.patchPVCAnnotations(ctx, namespace, name, annotations)
+}
+
+// reconcileReactivePod reacts to a Pending pod that the scheduler could not
+// place. If the pod is blocked because a zone-local proxmox-csi volume is
+// pinned to a cordoned/tainted node, and the pod has stayed unschedulable past
+// the grace period, it stamps a migration on the PVC so the volume (and the
+// pod) can move to a schedulable zone. It reuses the annotation-stamping path
+// of reconcileNode; it never calls the migrator directly.
+func (c *Controller) reconcileReactivePod(ctx context.Context, key string) error {
+	if !c.opts.ReactiveEvacuation {
+		return nil
+	}
+
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return nil //nolint:nilerr // malformed key, drop it
+	}
+
+	pod, err := c.kclient.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+
+		return err
+	}
+
+	// Confirm the scheduler actually failed to place the pod.
+	since, unschedulable := podUnschedulableSince(pod)
+	if !unschedulable {
+		return nil
+	}
+
+	// Grace period: do not react to a quick maintenance cordon+reboot. Requeue
+	// the remaining time and re-check; only proceed once the pod has been stuck
+	// long enough that this is a real drain, not a transient reschedule.
+	if remaining := c.opts.ReactiveEvacuationGrace - time.Since(since); remaining > 0 {
+		c.reactiveQueue.AddAfter(key, remaining)
+
+		return nil
+	}
+
+	for _, vol := range pod.Spec.Volumes {
+		if vol.PersistentVolumeClaim == nil {
+			continue
+		}
+
+		if err := c.evaluateReactivePVC(ctx, pod, namespace, vol.PersistentVolumeClaim.ClaimName); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// evaluateReactivePVC decides whether one PVC of an unschedulable pod is
+// blocked by a cordoned/tainted zone node and, if so, stamps a migration.
+func (c *Controller) evaluateReactivePVC(ctx context.Context, pod *corev1.Pod, namespace, pvcName string) error {
+	pvc, err := c.kclient.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+
+		return err
+	}
+
+	// Already requested, running, or terminally decided: do not re-stamp.
+	if migrationInFlight(pvc) || pvc.Spec.VolumeName == "" {
+		return nil
+	}
+
+	pv, err := c.kclient.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+
+		return err
+	}
+
+	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != csi.DriverName {
+		return nil
+	}
+
+	vol, err := volume.NewVolumeFromVolumeID(pv.Spec.CSI.VolumeHandle)
+	if err != nil {
+		return nil //nolint:nilerr // not our volume format
+	}
+
+	// Shared storage is reachable from every zone; the pod is not blocked on us.
+	if vol.Zone() == "" {
+		return nil
+	}
+
+	blocked, err := c.zoneBlocked(ctx, vol.Region(), vol.Zone())
+	if err != nil {
+		return err
+	}
+
+	// A schedulable node still satisfies the volume's zone: the pod is stuck
+	// for some other reason, not a cordoned volume node. Avoid false positives.
+	if !blocked {
+		return nil
+	}
+
+	target, err := c.autoTarget(ctx, pv, vol.Zone())
+	if err != nil {
+		c.recorder.Eventf(pvc, corev1.EventTypeWarning, "ReactiveEvacuation",
+			"pod %s/%s unschedulable: volume pinned to cordoned zone %s but no target zone has capacity: %v",
+			pod.Namespace, pod.Name, vol.Zone(), err)
+
+		return nil
+	}
+
+	c.recorder.Eventf(pvc, corev1.EventTypeNormal, "ReactiveEvacuation",
+		"pod %s/%s unschedulable: volume pinned to cordoned node in zone %s, migrating to %s",
+		pod.Namespace, pod.Name, vol.Zone(), target)
+	klog.InfoS("Reactive evacuation", "pod", pod.Namespace+"/"+pod.Name, "pvc", namespace+"/"+pvcName,
+		"from", vol.Zone(), "to", target)
+
+	return c.patchPVCAnnotations(ctx, namespace, pvcName, map[string]*string{
+		migrator.AnnotationMigrateNode:  ptr(target),
+		migrator.AnnotationMigrateForce: ptr("true"),
+	})
+}
+
+// zoneBlocked reports whether every node in the given region/zone is
+// unschedulable (cordoned or NoSchedule/NoExecute tainted) while at least one
+// such node exists. When a schedulable node still satisfies the zone, the pod
+// is not blocked on the volume's placement.
+func (c *Controller) zoneBlocked(ctx context.Context, region, zone string) (bool, error) {
+	nodes, err := c.kclient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+
+	found, blocked := false, false
+
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+
+		nodeRegion, nodeZone := csi.GetNodeTopology(node.Labels)
+		if nodeRegion != region || nodeZone != zone {
+			continue
+		}
+
+		found = true
+
+		if nodeSchedulable(node) {
+			return false, nil
+		}
+
+		blocked = true
+	}
+
+	return found && blocked, nil
+}
+
+// migrationInFlight reports whether a migration is already requested or running
+// for the PVC (so a reactive trigger must not re-stamp it).
+func migrationInFlight(pvc *corev1.PersistentVolumeClaim) bool {
+	if pvc.Annotations[migrator.AnnotationMigrateNode] != "" {
+		return true
+	}
+
+	switch pvc.Annotations[migrator.AnnotationMigratePhase] {
+	case migrator.PhasePending, migrator.PhaseDraining, migrator.PhaseMoving, migrator.PhaseRewiring:
+		return true
+	default:
+		return false
+	}
+}
+
+// nodeSchedulable reports whether the scheduler may place new pods on the node:
+// it must not be cordoned nor carry a NoSchedule/NoExecute taint.
+func nodeSchedulable(node *corev1.Node) bool {
+	if node.Spec.Unschedulable {
+		return false
+	}
+
+	for _, taint := range node.Spec.Taints {
+		if taint.Effect == corev1.TaintEffectNoSchedule || taint.Effect == corev1.TaintEffectNoExecute {
+			return false
+		}
+	}
+
+	return true
+}
+
+// podUnschedulableSince returns the time the pod entered the
+// PodScheduled=False / Unschedulable state and true when it is currently in it.
+// It falls back to the pod's creation time for a freshly recreated pod whose
+// condition carries no transition time.
+func podUnschedulableSince(pod *corev1.Pod) (time.Time, bool) {
+	if pod.Status.Phase != corev1.PodPending {
+		return time.Time{}, false
+	}
+
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type != corev1.PodScheduled {
+			continue
+		}
+
+		if cond.Status != corev1.ConditionFalse || cond.Reason != corev1.PodReasonUnschedulable {
+			return time.Time{}, false
+		}
+
+		since := cond.LastTransitionTime.Time
+		if since.IsZero() {
+			since = pod.CreationTimestamp.Time
+		}
+
+		return since, true
+	}
+
+	return time.Time{}, false
 }
 
 // autoTarget picks the zone with the most free space for the PV's storage.

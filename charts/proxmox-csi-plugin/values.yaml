@@ -426,6 +426,18 @@ migrator:
   # `primary_storage` map.
   podFollow: false
 
+  # -- Reactive node evacuation: make a standard `kubectl drain` transparent
+  # for zone-local volumes. When a pod cannot be scheduled because its volume
+  # is pinned to a cordoned/tainted node, the controller migrates the volume so
+  # the pod can schedule elsewhere. kubectl drain still owns stateless pod
+  # eviction and PDBs; this only moves the volume. Opt-in and conservative.
+  reactiveEvacuation:
+    # -- Enable reactive evacuation.
+    enabled: false
+    # -- How long a pod must stay unschedulable before a migration is stamped.
+    # Prevents a quick maintenance cordon+reboot from triggering a large copy.
+    grace: 2m
+
   # -- Maximum migration attempts per PVC before marking it Failed.
   maxAttempts: 5
 
