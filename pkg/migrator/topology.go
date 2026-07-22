@@ -53,6 +53,41 @@ var migrationAnnotations = []string{
 	AnnotationMigrateState,
 }
 
+// Kubernetes PV-controller / scheduler bookkeeping annotation keys, declared
+// here because upstream keeps them in internal packages.
+const (
+	annBindCompleted          = "pv.kubernetes.io/bind-completed"
+	annBoundByController      = "pv.kubernetes.io/bound-by-controller"
+	annSelectedNode           = "volume.kubernetes.io/selected-node"
+	annStorageProvisioner     = "volume.kubernetes.io/storage-provisioner"
+	annBetaStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
+)
+
+// binderBookkeepingAnnotations must be stripped from the recreated PVC: they
+// are the difference between a fresh manifest and a copy of a previously BOUND
+// claim. In particular:
+//
+//   - pv.kubernetes.io/bind-completed: with this present and spec.volumeName
+//     EMPTY, the PV controller treats the claim as having LOST its volume —
+//     phase Lost, and it is NEVER considered for binding again. The reserved
+//     PV then sits Available (correct empty-UID claimRef and all) while the
+//     bind wait times out.
+//   - pv.kubernetes.io/bound-by-controller: same bookkeeping family; stale on
+//     a recreate.
+//   - volume.kubernetes.io/selected-node: the WaitForFirstConsumer scheduler
+//     pin. Copied over, it would pin binding to the OLD node — typically the
+//     very node being evacuated.
+//   - volume.kubernetes.io/storage-provisioner (+ the legacy beta key):
+//     provisioner bookkeeping; stripped for clean fresh-manifest semantics
+//     (they are re-set if ever needed).
+var binderBookkeepingAnnotations = []string{
+	annBindCompleted,
+	annBoundByController,
+	annSelectedNode,
+	annStorageProvisioner,
+	annBetaStorageProvisioner,
+}
+
 // replacePVTopology rewires the PV/PVC pair so it points at the migrated disk's
 // new node and storage, using the documented "Reserving a PersistentVolume"
 // (claimRef pre-bind) pattern instead of racing a controller to recreate the PVC.
@@ -132,6 +167,17 @@ func (m *Migrator) replacePVTopology(
 	newPVC.Spec.VolumeName = ""
 
 	for _, a := range migrationAnnotations {
+		delete(newPVC.ObjectMeta.Annotations, a)
+	}
+
+	// Strip the binder's bookkeeping too — newPVC is a DeepCopy of the OLD
+	// bound claim, and a recreate must look like a fresh manifest. Keeping
+	// pv.kubernetes.io/bind-completed alongside the cleared volumeName makes
+	// the PV controller mark the recreated claim Lost and never bind it (the
+	// reservation stays Available while the bind wait times out), and a copied
+	// volume.kubernetes.io/selected-node would pin a WaitForFirstConsumer bind
+	// to the node being evacuated. See binderBookkeepingAnnotations.
+	for _, a := range binderBookkeepingAnnotations {
 		delete(newPVC.ObjectMeta.Annotations, a)
 	}
 
