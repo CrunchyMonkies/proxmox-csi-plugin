@@ -82,6 +82,8 @@ func setControllerCmdFlags(cmd *cobra.Command) {
 
 	flags.Bool("leader-election", true, "enable leader election")
 	flags.Bool("pod-follow", false, "migrate volumes automatically when all pods mounting them have moved to another zone")
+	flags.Bool("reactive-evacuation", false, "migrate a volume when its pod is unschedulable because the volume is pinned to a cordoned/tainted node (makes kubectl drain transparent)")
+	flags.Duration("reactive-evacuation-grace", migrationcontroller.DefaultReactiveEvacuationGrace, "how long a pod must stay unschedulable before reactive evacuation triggers")
 	flags.Int("max-attempts", 5, "maximum migration attempts per PVC before giving up")
 	flags.Int("helper-vmid", migrator.DefaultHelperVMID, "VM ID of the transient helper VM used to convert qcow2/vmdk volumes (must differ from the controller VMID)")
 	flags.Int("timeout", 10800, "Proxmox move-task timeout in seconds")
@@ -93,15 +95,17 @@ func setControllerCmdFlags(cmd *cobra.Command) {
 func (c *controllerCmd) runController(cmd *cobra.Command, _ []string) error {
 	flags := cmd.Flags()
 
-	leaderElection, _ := flags.GetBool("leader-election")        //nolint: errcheck
-	podFollow, _ := flags.GetBool("pod-follow")                  //nolint: errcheck
-	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
-	maxAttempts, _ := flags.GetInt("max-attempts")               //nolint: errcheck
-	helperVMID, _ := flags.GetInt("helper-vmid")                 //nolint: errcheck
-	taskTimeout, _ := flags.GetInt("timeout")                    //nolint: errcheck
-	drainTimeout, _ := flags.GetDuration("drain-timeout")        //nolint: errcheck
-	detachTimeout, _ := flags.GetDuration("detach-timeout")      //nolint: errcheck
-	metricsAddress, _ := flags.GetString("metrics-address")      //nolint: errcheck
+	leaderElection, _ := flags.GetBool("leader-election")              //nolint: errcheck
+	podFollow, _ := flags.GetBool("pod-follow")                        //nolint: errcheck
+	reactiveEvacuation, _ := flags.GetBool("reactive-evacuation")      //nolint: errcheck
+	reactiveGrace, _ := flags.GetDuration("reactive-evacuation-grace") //nolint: errcheck
+	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint)       //nolint: errcheck
+	maxAttempts, _ := flags.GetInt("max-attempts")                     //nolint: errcheck
+	helperVMID, _ := flags.GetInt("helper-vmid")                       //nolint: errcheck
+	taskTimeout, _ := flags.GetInt("timeout")                          //nolint: errcheck
+	drainTimeout, _ := flags.GetDuration("drain-timeout")              //nolint: errcheck
+	detachTimeout, _ := flags.GetDuration("detach-timeout")            //nolint: errcheck
+	metricsAddress, _ := flags.GetString("metrics-address")            //nolint: errcheck
 
 	ctx := cmd.Context()
 
@@ -133,12 +137,14 @@ func (c *controllerCmd) runController(cmd *cobra.Command, _ []string) error {
 	}
 
 	controller := migrationcontroller.New(c.kclient, m, recorder, migrationcontroller.Options{
-		MaxAttempts:    maxAttempts,
-		TaskTimeout:    taskTimeout,
-		DrainTimeout:   drainTimeout,
-		DetachTimeout:  detachTimeout,
-		PodFollow:      podFollow,
-		PrimaryStorage: c.primaryStorage,
+		MaxAttempts:             maxAttempts,
+		TaskTimeout:             taskTimeout,
+		DrainTimeout:            drainTimeout,
+		DetachTimeout:           detachTimeout,
+		PodFollow:               podFollow,
+		PrimaryStorage:          c.primaryStorage,
+		ReactiveEvacuation:      reactiveEvacuation,
+		ReactiveEvacuationGrace: reactiveGrace,
 	})
 
 	if !leaderElection {

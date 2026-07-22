@@ -57,6 +57,10 @@ spec:
             {{- if .Values.migrator.podFollow }}
             - "--pod-follow"
             {{- end }}
+            {{- if .Values.migrator.reactiveEvacuation.enabled }}
+            - "--reactive-evacuation"
+            - "--reactive-evacuation-grace={{ .Values.migrator.reactiveEvacuation.grace }}"
+            {{- end }}
             {{- if .Values.migrator.metrics.enabled }}
             - "--metrics-address=:{{ .Values.migrator.metrics.port }}"
             {{- end }}

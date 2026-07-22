@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jarcoal/httpmock"
 	"github.com/stretchr/testify/assert"
@@ -540,6 +541,162 @@ func TestReconcileFollowAlreadyRequested(t *testing.T) {
 	// have failed, proving the early return.
 	pvc := getPVC(t, c)
 	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode])
+}
+
+// newUnschedulablePod builds a Pending pod that the scheduler could not place,
+// mounting the test PVC, whose PodScheduled=False/Unschedulable condition
+// transitioned `age` ago. Backdating the transition time is required because
+// time is real in Go tests: the grace period is measured against wall clock.
+func newUnschedulablePod(age time.Duration) *corev1.Pod {
+	pod := newPod()
+	pod.Name = "test-0"
+	pod.Spec.NodeName = ""
+	pod.Status.Phase = corev1.PodPending
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:               corev1.PodScheduled,
+			Status:             corev1.ConditionFalse,
+			Reason:             corev1.PodReasonUnschedulable,
+			LastTransitionTime: metav1.NewTime(time.Now().Add(-age)),
+		},
+	}
+
+	return pod
+}
+
+// cordonedNode returns the test PVC's zone node, cordoned.
+func cordonedNode() *corev1.Node {
+	node := newNode(nil)
+	node.Spec.Unschedulable = true
+
+	return node
+}
+
+func newReactiveController(t *testing.T, objects ...interface{}) (*Controller, *fake.Clientset, *record.FakeRecorder) {
+	t.Helper()
+
+	c, kclient, recorder := newTestController(t, objects...)
+	c.opts.ReactiveEvacuation = true
+	c.opts.ReactiveEvacuationGrace = 2 * time.Minute
+
+	return c, kclient, recorder
+}
+
+func TestReconcileReactiveEvacuatePastGrace(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	c, _, recorder := newReactiveController(t,
+		newPVC(nil),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode], "autoTarget must pick the other zone hosting the storage")
+	assert.Equal(t, "true", pvc.Annotations[migrator.AnnotationMigrateForce])
+
+	event := <-recorder.Events
+	assert.Contains(t, event, "ReactiveEvacuation")
+}
+
+func TestReconcileReactiveWithinGrace(t *testing.T) {
+	c, _, _ := newReactiveController(t,
+		newPVC(nil),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		// Backdated to just inside the grace window: a small remaining delay so
+		// the requeue lands quickly and the test stays deterministic.
+		newUnschedulablePod(2*time.Minute-200*time.Millisecond))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	// Still within the grace window: nothing stamped yet.
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
+
+	// The pod is requeued (via AddAfter) to be re-checked once the grace period
+	// elapses; the delayed item becomes ready shortly after.
+	assert.Eventually(t, func() bool { return c.reactiveQueue.Len() > 0 }, 3*time.Second, 20*time.Millisecond,
+		"the pod must be requeued to re-check after the grace period")
+}
+
+func TestReconcileReactiveUnrelatedReason(t *testing.T) {
+	// Pod is unschedulable but the volume's zone node is schedulable (e.g. the
+	// pod is stuck on insufficient resources, not a cordoned volume node).
+	c, _, _ := newReactiveController(t,
+		newPVC(nil),
+		newPV("vm-9999-pvc-exist", nil),
+		newNode(nil), // not cordoned
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode], "a schedulable volume zone node must not trigger evacuation")
+}
+
+func TestReconcileReactiveNodeSchedulable(t *testing.T) {
+	// The volume's zone node exists and is schedulable: no stamp.
+	c, _, _ := newReactiveController(t,
+		newPVC(nil),
+		newPV("vm-9999-pvc-exist", nil),
+		newNode(nil),
+		newUnschedulablePod(5*time.Minute))
+
+	require.NoError(t, c.reconcileReactivePod(context.Background(), testNS+"/test-0"))
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
+}
+
+func TestReconcileReactiveDisabled(t *testing.T) {
+	c, _, _ := newTestController(t, // ReactiveEvacuation left off
+		newPVC(nil),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode], "feature disabled: nothing must be stamped")
+}
+
+func TestReconcileReactiveAlreadyMigrating(t *testing.T) {
+	c, _, _ := newReactiveController(t,
+		newPVC(map[string]string{migrator.AnnotationMigrateNode: "pve-2"}),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	// The existing request must be left untouched (no Proxmox responders are
+	// registered: reaching autoTarget would have failed, proving the skip).
+	pvc := getPVC(t, c)
+	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode])
+}
+
+func TestEnqueueReactiveFilter(t *testing.T) {
+	c, _, _ := newReactiveController(t)
+
+	// Running pod: not enqueued.
+	c.enqueueReactivePod(newPod())
+	assert.Equal(t, 0, c.reactiveQueue.Len(), "a running pod must not be enqueued")
+
+	// Pending+Unschedulable pod with a PVC: enqueued.
+	c.enqueueReactivePod(newUnschedulablePod(time.Minute))
+	assert.Equal(t, 1, c.reactiveQueue.Len(), "an unschedulable pod with a PVC must be enqueued")
 }
 
 func TestEnqueueFilters(t *testing.T) {
