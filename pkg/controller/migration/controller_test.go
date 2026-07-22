@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jarcoal/httpmock"
+	proxmox "github.com/luthermonson/go-proxmox"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -33,6 +34,7 @@ import (
 	testcluster "github.com/sergelogvinov/proxmox-csi-plugin/test/cluster"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -69,6 +71,9 @@ func newTestController(t *testing.T, objects ...interface{}) (*Controller, *fake
 			require.NoError(t, err)
 		case *corev1.Pod:
 			_, err := kclient.CoreV1().Pods(o.Namespace).Create(context.Background(), o, metav1.CreateOptions{})
+			require.NoError(t, err)
+		case *storagev1.StorageClass:
+			_, err := kclient.StorageV1().StorageClasses().Create(context.Background(), o, metav1.CreateOptions{})
 			require.NoError(t, err)
 		}
 	}
@@ -389,6 +394,78 @@ func TestReconcileNodeEvacuateAuto(t *testing.T) {
 	assert.Equal(t, "true", pvc.Annotations[migrator.AnnotationMigrateForce])
 }
 
+const gib = int64(1024 * 1024 * 1024)
+
+// newStorageClass returns a StorageClass of this driver naming the given
+// Proxmox storage; isDefault marks it as the cluster default.
+func newStorageClass(name, storage string, isDefault bool) *storagev1.StorageClass {
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: name},
+		Provisioner: csi.DriverName,
+		Parameters:  map[string]string{csi.StorageIDKey: storage},
+	}
+	if isDefault {
+		sc.Annotations = map[string]string{migrator.AnnotationDefaultStorageClass: "true"}
+	}
+
+	return sc
+}
+
+// registerCrossStorageCluster overrides the shared mock's cluster resources
+// with the per-zone storage layout of the observed gap: storA exists only on
+// the source zone pve-1, storB only on pve-2 (every zone has its own storage
+// name). Exact URLs beat the shared mock's regex catch-alls.
+func registerCrossStorageCluster() {
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/cluster/resources?type=storage",
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": proxmox.ClusterResources{
+				&proxmox.ClusterResource{ID: "storage/storA", Type: "storage", PluginType: "zfspool", Node: "pve-1", Storage: "storA", Content: "images", Status: "available"},
+				&proxmox.ClusterResource{ID: "storage/storB", Type: "storage", PluginType: "zfspool", Node: "pve-2", Storage: "storB", Content: "images", Status: "available"},
+			},
+		}))
+
+	for _, s := range []struct{ node, storage string }{{"pve-1", "storA"}, {"pve-2", "storB"}} {
+		httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/nodes/"+s.node+"/storage/"+s.storage+"/status",
+			httpmock.NewJsonResponderOrPanic(200, map[string]any{
+				"data": map[string]any{"type": "zfspool", "enabled": 1, "active": 1, "content": "images", "total": 100 * gib, "used": 10 * gib, "avail": 90 * gib},
+			}))
+	}
+}
+
+// newCrossStoragePV returns the test PV on storage storA in the test zone.
+func newCrossStoragePV() *corev1.PersistentVolume {
+	pv := newPV("vm-9999-pvc-exist", nil)
+	pv.Spec.CSI.VolumeHandle = testRegion + "/" + testZone + "/storA/vm-9999-pvc-exist"
+
+	return pv
+}
+
+func TestReconcileNodeEvacuateAutoCrossStorage(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+	registerCrossStorageCluster()
+
+	// The volume's storage storA exists ONLY in the source zone; no other zone
+	// hosts the name, so same-name targeting has nothing to offer. storB is
+	// blessed by the cluster-default StorageClass and pve-2 has capacity: the
+	// auto evacuation must stamp BOTH migrate-node and migrate-storage.
+	c, _, _ := newTestController(t,
+		newPVC(nil),
+		newCrossStoragePV(),
+		newNode(map[string]string{migrator.AnnotationEvacuate: "auto"}),
+		newStorageClass("proxmox-a", "storA", false),
+		newStorageClass("proxmox-b", "storB", true))
+
+	err := c.reconcileNode(context.Background(), "cluster-1-node-1")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode], "auto target must pick the zone hosting the blessed storage")
+	assert.Equal(t, "storB", pvc.Annotations[migrator.AnnotationMigrateStorage], "the migration must carry the target zone's storage")
+}
+
 // newZoneNode creates a kubernetes node in the given Proxmox zone.
 func newZoneNode(name, zone string) *corev1.Node {
 	return &corev1.Node{
@@ -603,6 +680,39 @@ func TestReconcileReactiveEvacuatePastGrace(t *testing.T) {
 
 	event := <-recorder.Events
 	assert.Contains(t, event, "ReactiveEvacuation")
+}
+
+func TestReconcileReactiveCrossStorage(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+	registerCrossStorageCluster()
+
+	// Zone pve-1 (hosting the volume's storage storA) is fully cordoned and no
+	// other zone hosts storA: reactive evacuation must fall back to the
+	// default-StorageClass storage storB on pve-2 and stamp migrate-storage
+	// alongside migrate-node — previously this failed with "no zone with N
+	// bytes available" because only same-name zones were considered.
+	c, _, recorder := newReactiveController(t,
+		newPVC(nil),
+		newCrossStoragePV(),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute),
+		newStorageClass("proxmox-a", "storA", false),
+		newStorageClass("proxmox-b", "storB", true))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode], "the zone hosting the blessed storage must be the target")
+	assert.Equal(t, "storB", pvc.Annotations[migrator.AnnotationMigrateStorage], "the migration must carry the target zone's storage")
+	assert.Equal(t, "true", pvc.Annotations[migrator.AnnotationMigrateForce])
+
+	event := <-recorder.Events
+	assert.Contains(t, event, "ReactiveEvacuation")
+	assert.Contains(t, event, "storB", "the event must name the chosen storage")
 }
 
 func TestReconcileReactiveWithinGrace(t *testing.T) {

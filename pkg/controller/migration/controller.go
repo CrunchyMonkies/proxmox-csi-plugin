@@ -563,9 +563,9 @@ func (c *Controller) reconcileNode(ctx context.Context, name string) error {
 			continue
 		}
 
-		pvcTarget := target
+		pvcTarget, pvcStorage := target, ""
 		if target == "auto" {
-			pvcTarget, perr = c.autoTarget(ctx, pv, zone)
+			pvcTarget, pvcStorage, perr = c.autoTarget(ctx, pv, zone)
 			if perr != nil {
 				klog.ErrorS(perr, "Failed to select evacuation target", "pv", pv.Name, "zone", zone)
 				c.recorder.Eventf(node, corev1.EventTypeWarning, "EvacuationFailed",
@@ -576,6 +576,10 @@ func (c *Controller) reconcileNode(ctx context.Context, name string) error {
 		}
 
 		annotations := map[string]*string{migrator.AnnotationMigrateNode: ptr(pvcTarget)}
+		if pvcStorage != "" {
+			annotations[migrator.AnnotationMigrateStorage] = ptr(pvcStorage)
+		}
+
 		if force {
 			annotations[migrator.AnnotationMigrateForce] = ptr("true")
 		}
@@ -829,7 +833,7 @@ func (c *Controller) evaluateReactivePVC(ctx context.Context, pod *corev1.Pod, n
 		return nil
 	}
 
-	target, err := c.autoTarget(ctx, pv, vol.Zone())
+	target, targetStorage, err := c.autoTarget(ctx, pv, vol.Zone())
 	if err != nil {
 		c.recorder.Eventf(pvc, corev1.EventTypeWarning, "ReactiveEvacuation",
 			"pod %s/%s unschedulable: volume pinned to cordoned zone %s but no target zone has capacity: %v",
@@ -838,16 +842,26 @@ func (c *Controller) evaluateReactivePVC(ctx context.Context, pod *corev1.Pod, n
 		return nil
 	}
 
+	targetDesc := target
+	if targetStorage != "" {
+		targetDesc = target + " (storage " + targetStorage + ")"
+	}
+
 	c.recorder.Eventf(pvc, corev1.EventTypeNormal, "ReactiveEvacuation",
 		"pod %s/%s unschedulable: volume pinned to cordoned node in zone %s, migrating to %s",
-		pod.Namespace, pod.Name, vol.Zone(), target)
+		pod.Namespace, pod.Name, vol.Zone(), targetDesc)
 	klog.InfoS("Reactive evacuation", "pod", pod.Namespace+"/"+pod.Name, "pvc", namespace+"/"+pvcName,
-		"from", vol.Zone(), "to", target)
+		"from", vol.Zone(), "to", target, "storage", targetStorage)
 
-	return c.patchPVCAnnotations(ctx, namespace, pvcName, map[string]*string{
+	annotations := map[string]*string{
 		migrator.AnnotationMigrateNode:  ptr(target),
 		migrator.AnnotationMigrateForce: ptr("true"),
-	})
+	}
+	if targetStorage != "" {
+		annotations[migrator.AnnotationMigrateStorage] = ptr(targetStorage)
+	}
+
+	return c.patchPVCAnnotations(ctx, namespace, pvcName, annotations)
 }
 
 // zoneBlocked reports whether every node in the given region/zone is
@@ -942,26 +956,41 @@ func podUnschedulableSince(pod *corev1.Pod) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// autoTarget picks the zone with the most free space for the PV's storage.
-func (c *Controller) autoTarget(ctx context.Context, pv *corev1.PersistentVolume, sourceZone string) (string, error) {
+// autoTarget picks the migration target zone and storage for the PV's volume.
+// Another zone hosting the volume's own storage name is preferred (upstream
+// behavior); when no such zone qualifies — clusters where every zone has its
+// own storage name — the candidates come from the storages named by the
+// driver's StorageClasses (see migrator.SelectCrossStorageTarget). The
+// returned storage is empty when the volume's storage name is kept, so callers
+// only stamp migrate-storage for a real cross-storage move.
+func (c *Controller) autoTarget(ctx context.Context, pv *corev1.PersistentVolume, sourceZone string) (string, string, error) {
 	vol, err := volume.NewVolumeFromVolumeID(pv.Spec.CSI.VolumeHandle)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	cluster, err := c.migrator.PClient.GetProxmoxCluster(vol.Region())
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
-	zones, err := migrator.ZoneCapacities(ctx, cluster, vol.Storage())
+	candidates, err := migrator.GatherStorageCandidates(ctx, cluster, c.kclient, vol.Storage())
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	size := pv.Spec.Capacity[corev1.ResourceStorage]
 
-	return migrator.SelectTarget(zones, []string{sourceZone}, size.Value(), migrator.DefaultHeadroom)
+	zone, storage, err := migrator.SelectCrossStorageTarget(candidates, sourceZone, vol.Storage(), size.Value(), migrator.DefaultHeadroom)
+	if err != nil {
+		return "", "", err
+	}
+
+	if storage == vol.Storage() {
+		storage = ""
+	}
+
+	return zone, storage, nil
 }
 
 func (c *Controller) failPVC(ctx context.Context, namespace, name, message string) error {

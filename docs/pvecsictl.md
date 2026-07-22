@@ -28,6 +28,11 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list"]
+  # Cross-storage target selection (evacuate/controller) lists the driver's
+  # StorageClasses to learn which Proxmox storages hold CSI volumes (list only)
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["list"]
   # Create and delete PV/PVC
   - apiGroups: [""]
     resources: ["persistentvolumes"]
@@ -35,6 +40,11 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # Target-class quota pre-flight: before the rewire deletes the old PVC, the
+  # migrator lists the namespace ResourceQuotas for headroom on the new class
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["list"]
   # Node cordoning/uncordoning
   - apiGroups: [""]
     resources: ["nodes"]
@@ -320,6 +330,8 @@ persistentvolumeclaim/storage-test-1   Bound    pvc-e248bc56-dcf4-4145-93b9-a374
 Evacuate all CSI volumes from a Proxmox node (zone), e.g. before node maintenance.
 
 By default, evacuate stamps `csi.proxmox.sinextra.dev/migrate-node` annotations on the affected PVCs and lets the [migration controller](migration-controller.md) execute them one at a time. With `--now` it runs the migrations synchronously (requires root credentials in the config, like `migrate`).
+
+Target selection understands per-zone storage names: a zone hosting the volume's own storage name is preferred, but on clusters where every zone has its own storage the candidates come from the storages named by the driver's StorageClasses (the cluster-default class first). When the chosen — or explicitly `--target`ed — zone does not host the source storage name, evacuate also stamps `migrate-storage` (or passes the target storage in `--now` mode).
 
 ```shell
 # Plan only: show which volume goes where (targets picked by free capacity)
