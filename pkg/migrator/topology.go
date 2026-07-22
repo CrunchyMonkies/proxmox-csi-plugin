@@ -72,12 +72,16 @@ var migrationAnnotations = []string{
 //     instantly recreates the PVC.
 //  3. Delete the old PVC and then the old (now Retain) PV object — neither deletes
 //     a disk.
-//  4. Recreate the PVC. For an unmanaged PVC the migrator creates it (pre-bound via
-//     spec.volumeName); for a controller-managed PVC the controller's own recreate
-//     wins the create and binds to the reserved PV via the claimRef. A create that
-//     returns AlreadyExists is therefore success, not an error — there is no PVC
-//     update fallback (a bound PVC's volumeName is immutable and the migrator's
-//     RBAC intentionally omits the update verb).
+//  4. Recreate the PVC. Binding is via the reserved PV's claimRef ONLY, for both
+//     the unmanaged case (the migrator creates the PVC) and the managed case (a
+//     controller's own recreate wins the create): neither PVC carries a
+//     spec.volumeName. Setting volumeName as well as the empty-UID claimRef is a
+//     double pre-bind the apiserver does NOT complete — it leaves the PVC Lost and
+//     the PV Available with a never-populated claimRef UID — so the migrator's own
+//     recreate must NOT set volumeName either; it lets the binder populate the UID
+//     and bind. A create that returns AlreadyExists is therefore success, not an
+//     error — there is no PVC update fallback (a bound PVC's volumeName is immutable
+//     and the migrator's RBAC intentionally omits the update verb).
 //  5. Verify the PVC is bound to the reserved PV. The wait is ADAPTIVE: an owner
 //     manifest may pin a storageClassName that differs from the reserved PV's
 //     (e.g. StatefulSet volumeClaimTemplates), in which case the recreated PVC
@@ -121,6 +125,11 @@ func (m *Migrator) replacePVTopology(
 	newPVC.ObjectMeta.ResourceVersion = ""
 	newPVC.ObjectMeta.DeletionTimestamp = nil
 	newPVC.ObjectMeta.DeletionGracePeriodSeconds = nil
+	// Clear the copied bound volumeName: the recreated PVC must bind via the
+	// reserved PV's claimRef ONLY. Carrying a volumeName (whether the old bound
+	// name or the reservation's) alongside the empty-UID claimRef is a double
+	// pre-bind the apiserver leaves in Lost/Available (see step 4 above).
+	newPVC.Spec.VolumeName = ""
 
 	for _, a := range migrationAnnotations {
 		delete(newPVC.ObjectMeta.Annotations, a)
@@ -195,10 +204,6 @@ func (m *Migrator) replacePVTopology(
 		Namespace:  namespace,
 		Name:       pvc.Name,
 	}
-
-	// Pre-bind the migrator's own recreate deterministically for an unmanaged PVC;
-	// a controller's recreate (no volumeName) still binds via the claimRef.
-	newPVC.Spec.VolumeName = newPVName
 
 	// The StorageClass of the rewired pair: when exactly one of the driver's
 	// StorageClasses names the TARGET storage, both the reserved PV and the
@@ -579,9 +584,15 @@ func (m *Migrator) reservedPVCIsIdleWFFC(ctx context.Context, namespace string, 
 		return false
 	}
 
-	// A consumer would trigger binding; if one already uses the PVC it is not
-	// idle and we keep waiting for the (imminent) bind instead.
-	pods, _, err := tools.PVCPodUsage(ctx, m.KClient, namespace, pvc.Name)
+	// A consumer would trigger binding; if one already references the PVC it is
+	// not idle and we keep waiting for the (imminent) bind instead. A PENDING
+	// consumer counts — the force-migration/reactive case leaves the workload's
+	// pod Pending (scheduled or not yet) waiting for exactly this volume, and it
+	// is what makes the WaitForFirstConsumer reservation bind — so use
+	// PVCConsumers (which counts Pending pods), NOT PVCPodUsage (which excludes
+	// them). Only a genuinely consumer-less claim takes the idle-WFFC success
+	// path; with a consumer we wait for the real bind.
+	pods, err := tools.PVCConsumers(ctx, m.KClient, namespace, pvc.Name)
 
 	return err == nil && len(pods) == 0
 }

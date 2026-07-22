@@ -37,7 +37,9 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 )
 
@@ -203,6 +205,90 @@ func getPVC(t *testing.T, c *Controller) *corev1.PersistentVolumeClaim {
 	return pvc
 }
 
+var (
+	pvcGVR    = corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims")
+	pvGVR     = corev1.SchemeGroupVersion.WithResource("persistentvolumes")
+	pvListGVK = corev1.SchemeGroupVersion.WithKind("PersistentVolume")
+)
+
+// reservedPV returns the migrator's reserved (claimRef pre-bind) PV in the
+// tracker: the CSI PV that claims the test PVC and is not the original.
+func reservedPV(tracker k8stesting.ObjectTracker) *corev1.PersistentVolume {
+	obj, err := tracker.List(pvGVR, pvListGVK, "")
+	if err != nil {
+		return nil
+	}
+
+	list, ok := obj.(*corev1.PersistentVolumeList)
+	if !ok {
+		return nil
+	}
+
+	for i := range list.Items {
+		pv := &list.Items[i]
+		if pv.Name != testPVName && pv.Spec.ClaimRef != nil && pv.Spec.ClaimRef.Name == testPVCName {
+			return pv
+		}
+	}
+
+	return nil
+}
+
+// pvcStorageClass mirrors how the binder reads a PVC's class (nil means "").
+func pvcStorageClass(pvc *corev1.PersistentVolumeClaim) string {
+	if pvc.Spec.StorageClassName == nil {
+		return ""
+	}
+
+	return *pvc.Spec.StorageClassName
+}
+
+// simulateClaimRefBinder models the Kubernetes PV binder with real apiserver
+// semantics (see the migrator package tests for the full rationale): a
+// still-Pending PVC with NO spec.volumeName binds its reserved PV via the
+// empty-UID claimRef (populating the PV.claimRef UID and marking both Bound),
+// while a PVC that already carries a volumeName is left untouched — the double
+// pre-bind a live apiserver never completes.
+func simulateClaimRefBinder(kclient *fake.Clientset) {
+	tracker := kclient.Tracker()
+
+	kclient.PrependReactor("get", "persistentvolumeclaims", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		ga, ok := action.(k8stesting.GetAction)
+		if !ok || ga.GetName() != testPVCName {
+			return false, nil, nil
+		}
+
+		obj, err := tracker.Get(pvcGVR, testNS, testPVCName)
+		if err != nil {
+			return false, nil, nil //nolint: nilerr
+		}
+
+		claim, ok := obj.(*corev1.PersistentVolumeClaim)
+		if !ok {
+			return false, nil, nil
+		}
+
+		claim = claim.DeepCopy()
+
+		if claim.Spec.VolumeName == "" && claim.Status.Phase != corev1.ClaimBound {
+			if reserved := reservedPV(tracker); reserved != nil && reserved.Spec.StorageClassName == pvcStorageClass(claim) {
+				if ref := reserved.Spec.ClaimRef; ref != nil && ref.UID == "" && ref.Namespace == testNS && ref.Name == claim.Name {
+					reserved = reserved.DeepCopy()
+					reserved.Spec.ClaimRef.UID = claim.UID
+					reserved.Status.Phase = corev1.VolumeBound
+					_ = tracker.Update(pvGVR, reserved, "") //nolint: errcheck
+
+					claim.Spec.VolumeName = reserved.Name
+					claim.Status.Phase = corev1.ClaimBound
+					_ = tracker.Update(pvcGVR, claim, testNS) //nolint: errcheck
+				}
+			}
+		}
+
+		return true, claim, nil
+	})
+}
+
 func TestReconcilePVCNoAnnotation(t *testing.T) {
 	c, _, _ := newTestController(t, newPVC(nil), newPV("vm-9999-pvc-exist", nil))
 
@@ -310,6 +396,10 @@ func TestReconcilePVCSuccess(t *testing.T) {
 	c, kclient, _ := newTestController(t,
 		newPVC(map[string]string{migrator.AnnotationMigrateNode: "pve-2"}),
 		newPV(disk, nil))
+
+	// The recreated PVC carries no volumeName; the binder binds it to the
+	// reserved data PV via the empty-UID claimRef, as a live apiserver would.
+	simulateClaimRefBinder(kclient)
 
 	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
 	require.NoError(t, err)
