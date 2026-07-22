@@ -52,6 +52,19 @@ const (
 	testNS      = "default"
 )
 
+// Kubernetes PV-controller / scheduler bookkeeping annotations a live BOUND
+// PVC carries (mirrors the migrator package tests). The fixtures stamp them on
+// every bound source PVC, and the simulated binder enforces the Lost trap they
+// set up, so a rewire that copies a bound PVC without stripping them fails
+// here the way it fails on a live cluster.
+const (
+	annBindCompleted          = "pv.kubernetes.io/bind-completed"
+	annBoundByController      = "pv.kubernetes.io/bound-by-controller"
+	annSelectedNode           = "volume.kubernetes.io/selected-node"
+	annStorageProvisioner     = "volume.kubernetes.io/storage-provisioner"
+	annBetaStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
+)
+
 func newTestController(t *testing.T, objects ...interface{}) (*Controller, *fake.Clientset, *record.FakeRecorder) {
 	t.Helper()
 
@@ -139,11 +152,25 @@ func newPV(disk string, annotations map[string]string) *corev1.PersistentVolume 
 }
 
 func newPVC(annotations map[string]string) *corev1.PersistentVolumeClaim {
+	// A live bound PVC carries the binder's bookkeeping annotations; including
+	// them in every fixture exercises the rewire's annotation strip.
+	anns := map[string]string{
+		annBindCompleted:          "yes",
+		annBoundByController:      "yes",
+		annSelectedNode:           "cluster-1-node-1",
+		annStorageProvisioner:     csi.DriverName,
+		annBetaStorageProvisioner: csi.DriverName,
+	}
+
+	for k, v := range annotations {
+		anns[k] = v
+	}
+
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        testPVCName,
 			Namespace:   testNS,
-			Annotations: annotations,
+			Annotations: anns,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			VolumeName: testPVName,
@@ -248,7 +275,11 @@ func pvcStorageClass(pvc *corev1.PersistentVolumeClaim) string {
 // still-Pending PVC with NO spec.volumeName binds its reserved PV via the
 // empty-UID claimRef (populating the PV.claimRef UID and marking both Bound),
 // while a PVC that already carries a volumeName is left untouched — the double
-// pre-bind a live apiserver never completes.
+// pre-bind a live apiserver never completes. A PVC annotated
+// pv.kubernetes.io/bind-completed while its volumeName is EMPTY has LOST its
+// volume per the PV controller: it is marked Lost and NEVER bound — the trap a
+// recreated PVC copied from a bound claim (without stripping the bookkeeping
+// annotations) falls into on a live cluster.
 func simulateClaimRefBinder(kclient *fake.Clientset) {
 	tracker := kclient.Tracker()
 
@@ -269,6 +300,14 @@ func simulateClaimRefBinder(kclient *fake.Clientset) {
 		}
 
 		claim = claim.DeepCopy()
+
+		// Real PV-controller semantics: bind-completed with an EMPTY volumeName
+		// means the claim LOST its volume — phase Lost, never bound again.
+		if _, completed := claim.Annotations[annBindCompleted]; completed && claim.Spec.VolumeName == "" {
+			claim.Status.Phase = corev1.ClaimLost
+
+			return true, claim, nil
+		}
 
 		if claim.Spec.VolumeName == "" && claim.Status.Phase != corev1.ClaimBound {
 			if reserved := reservedPV(tracker); reserved != nil && reserved.Spec.StorageClassName == pvcStorageClass(claim) {

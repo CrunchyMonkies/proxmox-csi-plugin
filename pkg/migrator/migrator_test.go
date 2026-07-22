@@ -53,6 +53,29 @@ const (
 	testNS      = "default"
 )
 
+// Kubernetes PV-controller / scheduler bookkeeping annotations a live BOUND
+// PVC carries (upstream keeps the constants in internal packages). Every
+// bound fixture PVC includes them, and the simulated binder enforces the Lost
+// trap they set up, so recreating a PVC from a bound copy WITHOUT stripping
+// them fails these tests the way it fails on a live cluster.
+const (
+	annBindCompleted          = "pv.kubernetes.io/bind-completed"
+	annBoundByController      = "pv.kubernetes.io/bound-by-controller"
+	annSelectedNode           = "volume.kubernetes.io/selected-node"
+	annStorageProvisioner     = "volume.kubernetes.io/storage-provisioner"
+	annBetaStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
+)
+
+// binderBookkeepingAnnotations lists the five keys above: the annotations a
+// rewired (recreated) PVC must NOT carry at Create time.
+var binderBookkeepingAnnotations = []string{
+	annBindCompleted,
+	annBoundByController,
+	annSelectedNode,
+	annStorageProvisioner,
+	annBetaStorageProvisioner,
+}
+
 // migratedPV returns the PersistentVolume the test PVC is bound to after a
 // successful migration. The rewire reserves a freshly named PV (claimRef
 // pre-bind), so the migrated volume is found through the PVC's volumeName
@@ -141,11 +164,26 @@ func newPV(disk string, annotations map[string]string) *corev1.PersistentVolume 
 }
 
 func newPVC(annotations map[string]string) *corev1.PersistentVolumeClaim {
+	// A live bound PVC carries the PV controller's and scheduler's bookkeeping
+	// annotations. The fixtures stamp them on every bound source PVC so the
+	// rewire's annotation strip is exercised by every migration test.
+	anns := map[string]string{
+		annBindCompleted:          "yes",
+		annBoundByController:      "yes",
+		annSelectedNode:           "cluster-1-node-1",
+		annStorageProvisioner:     csi.DriverName,
+		annBetaStorageProvisioner: csi.DriverName,
+	}
+
+	for k, v := range annotations {
+		anns[k] = v
+	}
+
 	return &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        testPVCName,
 			Namespace:   testNS,
-			Annotations: annotations,
+			Annotations: anns,
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			VolumeName: testPVName,
@@ -1537,6 +1575,9 @@ func simulateControllerRecreate(kclient *fake.Clientset, mutators ...func(*corev
 		_ = tracker.Delete(pvcGVR, testNS, testPVCName) //nolint: errcheck
 
 		fresh := newPVC(nil)
+		// An owner recreates the PVC from its OWN manifest: it carries none of
+		// the binder bookkeeping annotations a bound copy would.
+		fresh.ObjectMeta.Annotations = nil
 		fresh.Spec.VolumeName = ""
 		fresh.UID = "controller-recreated-uid"
 		fresh.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
@@ -1580,6 +1621,11 @@ func pvcStorageClass(pvc *corev1.PersistentVolumeClaim) string {
 //   - A PVC WITH spec.volumeName pointing at a foreign PV whose claimRef already
 //     carries a NON-empty UID that differs from the PVC's (a racing bind) is not
 //     the reservation completing either, and is left untouched.
+//   - A PVC whose annotations contain pv.kubernetes.io/bind-completed while its
+//     spec.volumeName is EMPTY has, per the PV controller, LOST its volume: it
+//     is marked Lost and is NEVER considered for binding again. This is the trap
+//     a recreated PVC copied from a bound claim (without stripping the binder
+//     bookkeeping annotations) falls into on a live cluster.
 func simulateClaimRefBinder(kclient *fake.Clientset) {
 	tracker := kclient.Tracker()
 
@@ -1600,6 +1646,14 @@ func simulateClaimRefBinder(kclient *fake.Clientset) {
 		}
 
 		claim = claim.DeepCopy()
+
+		// Real PV-controller semantics: bind-completed with an EMPTY volumeName
+		// means the claim LOST its volume — phase Lost, never bound again.
+		if _, completed := claim.Annotations[annBindCompleted]; completed && claim.Spec.VolumeName == "" {
+			claim.Status.Phase = corev1.ClaimLost
+
+			return true, claim, nil
+		}
 
 		// Only a still-Pending claim WITHOUT a volumeName is completable via the
 		// reservation. A volumeName already set — whether the buggy double
@@ -1851,7 +1905,11 @@ func TestClaimRefBinderRefusesDoublePrebind(t *testing.T) {
 	}
 
 	// Buggily created WITH the volumeName already set (the double pre-bind).
+	// The bookkeeping annotations are cleared to isolate the volumeName trap:
+	// a migrator-created recreate carries none of them (they are stripped),
+	// and the bind-completed Lost trap has its own guard test.
 	pvc := newPVC(nil)
+	pvc.ObjectMeta.Annotations = nil
 	pvc.Spec.VolumeName = reservedName
 	pvc.UID = "double-prebind-uid"
 	pvc.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
@@ -1882,6 +1940,115 @@ func TestClaimRefBinderRefusesDoublePrebind(t *testing.T) {
 	pv, err = kclient.CoreV1().PersistentVolumes().Get(context.Background(), reservedName, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "double-prebind-uid", string(pv.Spec.ClaimRef.UID), "the completed reservation populates the PV.claimRef UID")
+}
+
+func TestMigrateRecreatedPVCStripsBindAnnotations(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// The source PVC is a live BOUND claim: it carries the PV controller's
+	// bind-completed/bound-by-controller bookkeeping, the scheduler's
+	// selected-node pin, and the provisioner annotations (the newPVC fixture
+	// stamps all five). The migrator's recreate is a DeepCopy of it, so every
+	// one of them MUST be stripped at Create time: bind-completed with the
+	// cleared volumeName marks the recreated claim Lost (never bound again),
+	// and selected-node would pin a WFFC bind to the evacuated node.
+	disk := "vm-9999-pvc-exist"
+	registerMoveResponder(disk, "local-lvm:"+disk)
+
+	kclient := fake.NewClientset(newPVC(nil), newPV(disk, nil), newNode(), newCSINode())
+	simulateClaimRefBinder(kclient)
+
+	m := &migrator.Migrator{KClient: kclient, PClient: newProxmoxPool(t)}
+
+	err := m.Migrate(context.Background(), migrator.Request{
+		Namespace:  testNS,
+		PVCName:    testPVCName,
+		TargetNode: "pve-2",
+	})
+	require.NoError(t, err)
+
+	// Inspect the PVC object handed to Create, not the stored state: the strip
+	// must happen in the manifest the migrator submits.
+	created := createdPVCs(kclient)
+	require.NotEmpty(t, created, "the migrator must have issued its own recreate")
+
+	for _, c := range created {
+		for _, ann := range binderBookkeepingAnnotations {
+			assert.NotContains(t, c.Annotations, ann, "the recreated PVC must not carry the binder bookkeeping annotation %s", ann)
+		}
+	}
+
+	// And binding completed via the reservation.
+	boundPV := migratedPV(t, kclient)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, boundPV.Spec.CSI.VolumeHandle)
+
+	boundPVC, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, corev1.ClaimBound, boundPVC.Status.Phase, "the stripped recreate must bind the reservation")
+}
+
+func TestClaimRefBinderBindCompletedWithoutVolumeIsLost(t *testing.T) {
+	// The regression this documents (root-caused live): a PVC recreated as a
+	// copy of the old bound claim KEEPS pv.kubernetes.io/bind-completed while
+	// its volumeName is cleared. The PV controller then treats the claim as
+	// having LOST its volume — the reservation sits Available with its correct
+	// empty-UID claimRef, the PVC goes Lost, and the bind wait times out.
+	// Removing the annotation is all it takes for the binder to complete the
+	// reservation (exactly what unblocked the live migration within seconds).
+	reservedName := "pvc-reserved-data"
+
+	reserved := newPV("vm-9999-pvc-exist", nil)
+	reserved.Name = reservedName
+	reserved.Spec.ClaimRef = &corev1.ObjectReference{
+		Kind:       "PersistentVolumeClaim",
+		APIVersion: "v1",
+		Namespace:  testNS,
+		Name:       testPVCName,
+		// EMPTY UID: an unbound reservation.
+	}
+
+	// The buggy shape: bind-completed retained (the fixture stamps it), no
+	// volumeName.
+	pvc := newPVC(nil)
+	pvc.Spec.VolumeName = ""
+	pvc.UID = "lost-claim-uid"
+	pvc.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
+
+	kclient := fake.NewClientset(pvc, reserved)
+	simulateClaimRefBinder(kclient)
+
+	got, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, corev1.ClaimLost, got.Status.Phase, "bind-completed with an empty volumeName is a LOST claim")
+	assert.Empty(t, got.Spec.VolumeName, "a Lost claim is never bound")
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), reservedName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NotNil(t, pv.Spec.ClaimRef)
+	assert.Empty(t, pv.Spec.ClaimRef.UID, "the reservation must stay Available: a Lost claim never completes it")
+
+	// Stripping the bookkeeping annotations (what the rewire does) makes the
+	// same claim bindable again.
+	fixed := got.DeepCopy()
+	for _, ann := range binderBookkeepingAnnotations {
+		delete(fixed.Annotations, ann)
+	}
+
+	fixed.Status = corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending}
+	_, err = kclient.CoreV1().PersistentVolumeClaims(testNS).Update(context.Background(), fixed, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	bound, err := kclient.CoreV1().PersistentVolumeClaims(testNS).Get(context.Background(), testPVCName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, corev1.ClaimBound, bound.Status.Phase, "with the annotations stripped the reservation binds")
+	assert.Equal(t, reservedName, bound.Spec.VolumeName)
+
+	pv, err = kclient.CoreV1().PersistentVolumes().Get(context.Background(), reservedName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "lost-claim-uid", string(pv.Spec.ClaimRef.UID), "the completed reservation populates the PV.claimRef UID")
 }
 
 func TestMigrateManagedPVCReboundToDifferentPVFails(t *testing.T) {
@@ -2183,6 +2350,8 @@ func TestMigrateManagedPVCPinnedClassRacingEmptyPVReplaced(t *testing.T) {
 		_ = tracker.Delete(pvcGVR, testNS, testPVCName) //nolint: errcheck
 
 		fresh := newPVC(nil)
+		// An owner recreate from its own manifest: no binder bookkeeping.
+		fresh.ObjectMeta.Annotations = nil
 		fresh.Spec.StorageClassName = &pinned
 		fresh.Spec.VolumeName = ""
 		fresh.UID = "controller-recreated-uid"

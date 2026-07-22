@@ -59,6 +59,12 @@ func renamePVC(
 	pv *corev1.PersistentVolume,
 	newName string,
 ) error {
+	// This recreate KEEPS spec.volumeName, so the copied binder bookkeeping
+	// annotations (pv.kubernetes.io/bind-completed et al.) are harmless here:
+	// the PV controller takes its bound-claim sync path and re-binds the claim
+	// against the claimRef-cleared PV. The Lost trap — bind-completed retained
+	// while volumeName is EMPTY — is why pkg/migrator strips them; it does not
+	// apply to rename/swap. The same holds for swapPVC below.
 	newPVC := pvc.DeepCopy()
 	newPVC.ObjectMeta.Name = newName
 	newPVC.ObjectMeta.UID = ""
