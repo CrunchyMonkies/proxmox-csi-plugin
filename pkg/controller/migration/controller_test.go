@@ -351,6 +351,107 @@ func TestReconcilePVCAlreadyOnTarget(t *testing.T) {
 	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
 }
 
+func TestReconcilePVCAlreadyInTargetZoneCompletes(t *testing.T) {
+	// migrate-node names the volume's current zone and NO storage change is
+	// requested: the volume is truly already on target, so the controller
+	// short-circuits to Completed and strips the request without a move.
+	c, _, _ := newTestController(t,
+		newPVC(map[string]string{migrator.AnnotationMigrateNode: testZone}),
+		newPV("vm-9999-pvc-exist", nil))
+
+	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
+	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
+}
+
+func TestReconcilePVCSameNodeSameStorageCompletes(t *testing.T) {
+	// migrate-node names the volume's current zone and migrate-storage names the
+	// volume's CURRENT storage: nothing actually changes, so the controller must
+	// still short-circuit to Completed (no move). No Proxmox responders are
+	// registered, so reaching the migrator would fail — proving the short-circuit.
+	c, _, _ := newTestController(t,
+		newPVC(map[string]string{
+			migrator.AnnotationMigrateNode:    testZone,
+			migrator.AnnotationMigrateStorage: testStorage,
+		}),
+		newPV("vm-9999-pvc-exist", nil))
+
+	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateStorage])
+	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
+}
+
+func TestReconcilePVCSameNodeStorageChangeMigrates(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	disk := "vm-9999-pvc-exist"
+	upid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:qmmove:103:root@pam:"
+	moved := false
+
+	// A same-node storage move keeps the node (pve-1) and changes only the
+	// storage (local-lvm -> zfs). The disk-move POST hits the SOURCE node and
+	// storage; the verify + rewire read the TARGET storage on the SAME node.
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`+disk,
+		func(_ *http.Request) (*http.Response, error) {
+			moved = true
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": upid})
+		})
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/nodes/pve-1/storage/zfs/content",
+		func(_ *http.Request) (*http.Response, error) {
+			if moved {
+				return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{{"volid": "zfs:" + disk, "size": int64(5 * 1024 * 1024 * 1024)}}})
+			}
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{}})
+		})
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+upid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": upid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	// migrate-node is the volume's OWN zone, but migrate-storage names a
+	// DIFFERENT storage: this is a real same-node cross-storage migration, not an
+	// already-on-target no-op, so the controller must perform the move.
+	c, kclient, _ := newTestController(t,
+		newPVC(map[string]string{
+			migrator.AnnotationMigrateNode:    testZone,
+			migrator.AnnotationMigrateStorage: "zfs",
+		}),
+		newPV(disk, nil))
+
+	// The recreated PVC carries no volumeName; the binder binds it to the
+	// reserved data PV via the empty-UID claimRef, as a live apiserver would.
+	simulateClaimRefBinder(kclient)
+
+	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
+	require.NoError(t, err)
+
+	// The disk was actually moved: NOT a silent already-on-target completion.
+	assert.True(t, moved, "a same-node cross-storage request must perform a real disk move")
+
+	pvc := getPVC(t, c)
+	require.NotEmpty(t, pvc.Spec.VolumeName)
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), pvc.Spec.VolumeName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/"+testZone+"/zfs/"+disk, pv.Spec.CSI.VolumeHandle,
+		"the PV must rewire to the new storage on the same node")
+
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
+	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
+}
+
 func TestReconcilePVCInUseWithoutForce(t *testing.T) {
 	c, _, recorder := newTestController(t,
 		newPVC(map[string]string{migrator.AnnotationMigrateNode: "pve-2"}),
