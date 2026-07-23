@@ -40,8 +40,10 @@ import (
 const maxClassReconciliations = 2
 
 // migrationAnnotations are stripped from the recreated PVC/PV so a completed
-// migration cannot re-trigger itself.
-var migrationAnnotations = []string{
+// migration cannot re-trigger itself. Both the canonical keys and their
+// legacy upstream variants are stripped: a legacy-stamped request must not
+// linger on the recreated objects either.
+var migrationAnnotations = withLegacyVariants([]string{
 	AnnotationMigrate,
 	AnnotationMigrateNode,
 	AnnotationMigrateForce,
@@ -51,6 +53,21 @@ var migrationAnnotations = []string{
 	AnnotationMigrateAttempts,
 	AnnotationMigrateStartedAt,
 	AnnotationMigrateState,
+})
+
+// withLegacyVariants appends the legacy upstream variant of every canonical
+// key that has one.
+func withLegacyVariants(keys []string) []string {
+	out := make([]string, 0, 2*len(keys))
+	out = append(out, keys...)
+
+	for _, key := range keys {
+		if legacy := LegacyAnnotation(key); legacy != "" {
+			out = append(out, legacy)
+		}
+	}
+
+	return out
 }
 
 // Kubernetes PV-controller / scheduler bookkeeping annotation keys, declared

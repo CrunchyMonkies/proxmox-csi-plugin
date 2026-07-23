@@ -40,7 +40,7 @@ pvecsictl controller --config=/etc/proxmox/config.yaml
     - `--token-copy-endpoint` → the [`pve-csi-copy`](../hack/pve-token-copy/) package (`POST /nodes/{node}/storage/{storage}/csi-copy`), a self-contained hack that rewrites `pvedaemon`/`pveproxy`'s `ExecStart` itself. Still supported and unmodified.
 
     Both are per-process flags; for a mixed fleet override them per cluster with `proxmod_endpoint: true` / `token_copy_endpoint: true` in the cloud-config, so clusters without the package keep the built-in path. **If both resolve true for a cluster, proxmod wins.** Whichever you pick, the token must also carry the privileges the rest of the migration uses: `VM.Audit` (read VM config during detach/helper lookup), `VM.Allocate` + `VM.Config.Disk` (the qcow2/vmdk helper-VM conversion), and `Datastore.Allocate` (partial-file and helper-disk cleanup). This is a real improvement over root@pam (no shell, ACL-path-scopeable) but still a **powerful** grant — `Datastore.Allocate` can delete any volume on that storage. Provide **only** the token (omit `username`/`password`): the client uses username/password when both are present, so leaving them in silently keeps you on root@pam. See [hack/proxmod-csi-storage/README.md](../hack/proxmod-csi-storage/README.md) and [hack/pve-token-copy/README.md](../hack/pve-token-copy/README.md).
-- Nodes labelled with `topology.kubernetes.io/region` / `zone` (or the `topology.proxmox.sinextra.dev/*` equivalents). Node-to-VMID resolution needs **no extra setup**: if the node has a `proxmox://<region>/<vmid>` providerID (Proxmox CCM) or the `proxmox.sinextra.dev/instance-id` annotation, that value is used; otherwise — e.g. a foreign providerID such as `rke2://…` on a cluster without the Proxmox CCM — the migrator resolves the VM from the Proxmox API the same way the CSI controller does: the VM whose name starts with the node name **and** whose SMBIOS UUID matches the node's system UUID, then by system UUID alone if no VM name matches. A VM found in a different region than the volume is rejected. The annotation remains an explicit override for setups the lookup cannot verify (e.g. nodes that report no system UUID).
+- Nodes labelled with `topology.kubernetes.io/region` / `zone` (or the `topology.proxmox.crunchymonkies.com/*` equivalents; the legacy `topology.proxmox.sinextra.dev/*` labels from the upstream Proxmox CCM are still read). Node-to-VMID resolution needs **no extra setup**: if the node has a `proxmox://<region>/<vmid>` providerID (Proxmox CCM) or the `proxmox.crunchymonkies.com/instance-id` annotation (legacy `proxmox.sinextra.dev/instance-id` still read), that value is used; otherwise — e.g. a foreign providerID such as `rke2://…` on a cluster without the Proxmox CCM — the migrator resolves the VM from the Proxmox API the same way the CSI controller does: the VM whose name starts with the node name **and** whose SMBIOS UUID matches the node's system UUID, then by system UUID alone if no VM name matches. A VM found in a different region than the volume is rejected. The annotation remains an explicit override for setups the lookup cannot verify (e.g. nodes that report no system UUID).
 - A **free Proxmox VM ID** for the transient conversion helper (`migrator.helperVMID`, default `9998`). It must not belong to a real VM and must differ from the controller VMID that owns the CSI disks.
 
 ### Deployment (Helm)
@@ -76,7 +76,7 @@ This deploys:
 ### Migrating a single volume
 
 ```shell
-kubectl -n default annotate pvc storage-test-0 csi.proxmox.sinextra.dev/migrate-node=hvm-2
+kubectl -n default annotate pvc storage-test-0 proxmox.crunchymonkies.com/migrate-node=hvm-2
 ```
 
 Watch progress via the `migrate-phase` annotation and PVC events:
@@ -94,18 +94,20 @@ On success the PV's volume handle and node affinity point at the new zone, the r
 
 | Annotation | Value | Meaning |
 |---|---|---|
-| `csi.proxmox.sinextra.dev/migrate-node` | Proxmox node name | Migrate this PVC's volume to the given zone |
-| `csi.proxmox.sinextra.dev/migrate-force` | `"true"` | Allow disrupting pods that use the PVC (cordon + delete pods). Without it, an in-use PVC is skipped |
-| `csi.proxmox.sinextra.dev/migrate-storage` | storage ID | Move the disk into this storage on the target node (default: keep the storage name). With `migrate-node` set to the volume's **current** node, this performs a same-node storage move (only the storage changes; same-node requests without a different storage are rejected as already-on-target) |
+| `proxmox.crunchymonkies.com/migrate-node` | Proxmox node name | Migrate this PVC's volume to the given zone |
+| `proxmox.crunchymonkies.com/migrate-force` | `"true"` | Allow disrupting pods that use the PVC (cordon + delete pods). Without it, an in-use PVC is skipped |
+| `proxmox.crunchymonkies.com/migrate-storage` | storage ID | Move the disk into this storage on the target node (default: keep the storage name). With `migrate-node` set to the volume's **current** node, this performs a same-node storage move (only the storage changes; same-node requests without a different storage are rejected as already-on-target) |
+
+> **Legacy keys.** The same annotations under the upstream `csi.proxmox.sinextra.dev/` prefix remain accepted for compatibility: the controller reads the canonical `proxmox.crunchymonkies.com/` key first and falls back to the legacy variant, and it clears **both** variants when it consumes a request (so a legacy-stamped request cannot linger and re-trigger). Status is written under the canonical keys only. The CSI **driver name** (`csi.proxmox.sinextra.dev`) is unchanged — it is baked into every provisioned PV and keeps the fork drop-in compatible with upstream; only annotation/label keys moved to the project namespace.
 
 #### Status annotations (written by the controller)
 
 | Annotation | Meaning |
 |---|---|
-| `csi.proxmox.sinextra.dev/migrate-phase` | `Pending`, `Draining`, `Moving`, `Rewiring`, `Completed`, `Skipped`, or `Failed` |
-| `csi.proxmox.sinextra.dev/migrate-message` | Last error or progress message |
-| `csi.proxmox.sinextra.dev/migrate-attempts` | Reconcile attempts so far |
-| `csi.proxmox.sinextra.dev/migrate-started-at` | RFC3339 start time |
+| `proxmox.crunchymonkies.com/migrate-phase` | `Pending`, `Draining`, `Moving`, `Rewiring`, `Completed`, `Skipped`, or `Failed` |
+| `proxmox.crunchymonkies.com/migrate-message` | Last error or progress message |
+| `proxmox.crunchymonkies.com/migrate-attempts` | Reconcile attempts so far |
+| `proxmox.crunchymonkies.com/migrate-started-at` | RFC3339 start time |
 
 `Failed` is terminal: the controller will not retry until you change or remove the request annotations. Transient errors are retried with exponential backoff up to `--max-attempts` (default 5). `Skipped` means the migration was unnecessary (shared storage — see below).
 
@@ -114,13 +116,15 @@ On success the PV's volume handle and node affinity point at the new zone, the r
 Drain all CSI volumes off a Proxmox node before maintenance — either by annotating any Kubernetes node in that zone:
 
 ```shell
-kubectl annotate node kube-store-11 csi.proxmox.sinextra.dev/evacuate=auto
+kubectl annotate node kube-store-11 proxmox.crunchymonkies.com/evacuate=auto
 ```
 
 | Annotation | Value | Meaning |
 |---|---|---|
-| `csi.proxmox.sinextra.dev/evacuate` | Proxmox node name or `auto` | Request migration of **all** CSI volumes out of this node's zone. `auto` picks a target per volume by free capacity |
-| `csi.proxmox.sinextra.dev/evacuate-force` | `"true"` | Stamp `migrate-force` on the evacuated PVCs |
+| `proxmox.crunchymonkies.com/evacuate` | Proxmox node name or `auto` | Request migration of **all** CSI volumes out of this node's zone. `auto` picks a target per volume by free capacity |
+| `proxmox.crunchymonkies.com/evacuate-force` | `"true"` | Stamp `migrate-force` on the evacuated PVCs |
+
+The legacy `csi.proxmox.sinextra.dev/evacuate[-force]` annotations remain accepted; both variants are cleared when the request is consumed.
 
 `auto` target selection understands **per-zone storage names**: another zone hosting the volume's own storage name is preferred, but on clusters where every zone has its own storage (zone A: `local-zfs`, zone B: `CSI-Pool`) the candidates come from the storages named by the driver's StorageClasses — the cluster-default class's storage first, then any class's storage by free space, always honoring the capacity headroom. When the chosen zone does not host the source storage name, `migrate-storage` is stamped alongside `migrate-node`. Storages without a StorageClass are never targeted (candidates come from operator intent, not from scanning Proxmox).
 
@@ -265,7 +269,7 @@ A name guard completes the safety story: if the configured helper VM ID is occup
 
 ### Crash recovery and cordon hygiene
 
-- Before any disk move, `csi.proxmox.sinextra.dev/migrate-state` is stamped on the **PV** (it survives the PVC recreate). After a crash, the next reconcile detects a fully-sized disk on the target and resumes at the rewire instead of re-moving.
+- Before any disk move, `proxmox.crunchymonkies.com/migrate-state` is stamped on the **PV** (it survives the PVC recreate). After a crash, the next reconcile detects a fully-sized disk on the target and resumes at the rewire instead of re-moving.
 - Nodes cordoned by a force migration are uncordoned by a deferred cleanup on *every* exit path — upstream's CLI only uncordoned on success, leaking cordons on any failure.
 - Stale helper VMs from crashed runs are removed on the next attempt (safe per the ownership asymmetry above).
 
@@ -313,9 +317,9 @@ Tested against **Proxmox VE 9.2.3** (`pve-manager/9.2.3`, `libpve-storage-perl 9
 
 ## Manual verification (integration)
 
-1. `kubectl -n default annotate pvc storage-test-0 csi.proxmox.sinextra.dev/migrate-node=hvm-2`
+1. `kubectl -n default annotate pvc storage-test-0 proxmox.crunchymonkies.com/migrate-node=hvm-2`
 2. Watch `kubectl -n default get pvc storage-test-0 -o jsonpath='{.metadata.annotations}'` — phase progresses `Pending → Moving → Rewiring → Completed`
 3. Verify the PV: `kubectl get pv <pv> -o jsonpath='{.spec.nodeAffinity}'` shows the new zone
 4. Kill the controller pod during `Moving`; confirm the migration resumes after restart
-5. `kubectl annotate node <node> csi.proxmox.sinextra.dev/evacuate=auto`; confirm all PVCs in that zone get `migrate-node` annotations and migrate one at a time
+5. `kubectl annotate node <node> proxmox.crunchymonkies.com/evacuate=auto`; confirm all PVCs in that zone get `migrate-node` annotations and migrate one at a time
 6. Confirm no `csi-migration-helper` VM remains after each run (`qm list`)

@@ -226,7 +226,7 @@ func (c *Controller) enqueuePVC(obj interface{}) {
 		return
 	}
 
-	if pvc.Annotations[migrator.AnnotationMigrateNode] == "" {
+	if migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateNode) == "" {
 		return
 	}
 
@@ -239,7 +239,7 @@ func (c *Controller) enqueueNode(obj interface{}) {
 		return
 	}
 
-	if node.Annotations[migrator.AnnotationEvacuate] == "" {
+	if migrator.GetAnnotation(node.Annotations, migrator.AnnotationEvacuate) == "" {
 		return
 	}
 
@@ -382,12 +382,12 @@ func (c *Controller) reconcilePVC(ctx context.Context, key string) error {
 		return err
 	}
 
-	target := pvc.Annotations[migrator.AnnotationMigrateNode]
+	target := migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateNode)
 	if target == "" {
 		return nil
 	}
 
-	phase := pvc.Annotations[migrator.AnnotationMigratePhase]
+	phase := migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigratePhase)
 	if phase == migrator.PhaseFailed {
 		// Terminal until a human clears or changes the request annotations.
 		return nil
@@ -395,7 +395,7 @@ func (c *Controller) reconcilePVC(ctx context.Context, key string) error {
 
 	// Requested storage, if any. A same-node request that also asks for a
 	// different storage is a real storage move, not an already-on-target no-op.
-	reqStorage := pvc.Annotations[migrator.AnnotationMigrateStorage]
+	reqStorage := migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateStorage)
 
 	// Already on target? Mark completed and strip the request. This only holds
 	// when the volume is TRULY already on target: it is in the requested zone
@@ -413,12 +413,12 @@ func (c *Controller) reconcilePVC(ctx context.Context, key string) error {
 					migrator.AnnotationMigrateForce:   nil,
 					migrator.AnnotationMigrateStorage: nil,
 					migrator.AnnotationMigratePhase:   ptr(migrator.PhaseCompleted),
-				})
+				}) // the patch helpers clear the legacy variants of every touched key
 			}
 		}
 	}
 
-	force := pvc.Annotations[migrator.AnnotationMigrateForce] == "true"
+	force := migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateForce) == "true"
 
 	// In use without force is a terminal skip, not a retry loop.
 	pods, _, err := tools.PVCPodUsage(ctx, c.kclient, namespace, name)
@@ -433,7 +433,7 @@ func (c *Controller) reconcilePVC(ctx context.Context, key string) error {
 		return c.failPVC(ctx, namespace, name, fmt.Sprintf("in use by pods: %v", pods))
 	}
 
-	attempts, _ := strconv.Atoi(pvc.Annotations[migrator.AnnotationMigrateAttempts]) //nolint: errcheck
+	attempts, _ := strconv.Atoi(migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateAttempts)) //nolint: errcheck
 	if attempts >= c.opts.MaxAttempts {
 		c.recorder.Eventf(pvc, corev1.EventTypeWarning, "MigrationFailed",
 			"giving up after %d attempts", attempts)
@@ -446,7 +446,7 @@ func (c *Controller) reconcilePVC(ctx context.Context, key string) error {
 		migrator.AnnotationMigrateAttempts: ptr(strconv.Itoa(attempts + 1)),
 		migrator.AnnotationMigrateMessage:  nil,
 	}
-	if pvc.Annotations[migrator.AnnotationMigrateStartedAt] == "" {
+	if migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateStartedAt) == "" {
 		annotations[migrator.AnnotationMigrateStartedAt] = ptr(time.Now().UTC().Format(time.RFC3339))
 	}
 
@@ -469,7 +469,7 @@ func (c *Controller) reconcilePVC(ctx context.Context, key string) error {
 		Namespace:     namespace,
 		PVCName:       name,
 		TargetNode:    target,
-		TargetStorage: pvc.Annotations[migrator.AnnotationMigrateStorage],
+		TargetStorage: migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateStorage),
 		Force:         force,
 		TaskTimeout:   c.opts.TaskTimeout,
 		DrainTimeout:  c.opts.DrainTimeout,
@@ -539,7 +539,7 @@ func (c *Controller) reconcileNode(ctx context.Context, name string) error {
 		return err
 	}
 
-	target := node.Annotations[migrator.AnnotationEvacuate]
+	target := migrator.GetAnnotation(node.Annotations, migrator.AnnotationEvacuate)
 	if target == "" {
 		return nil
 	}
@@ -551,7 +551,7 @@ func (c *Controller) reconcileNode(ctx context.Context, name string) error {
 		return c.patchNodeAnnotations(ctx, name, map[string]*string{migrator.AnnotationEvacuate: nil})
 	}
 
-	force := node.Annotations[migrator.AnnotationEvacuateForce] == "true"
+	force := migrator.GetAnnotation(node.Annotations, migrator.AnnotationEvacuateForce) == "true"
 
 	pvs, err := tools.PVsInZone(ctx, c.kclient, csi.DriverName, region, zone)
 	if err != nil {
@@ -570,7 +570,7 @@ func (c *Controller) reconcileNode(ctx context.Context, name string) error {
 		pvcNS, pvcName := pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name
 
 		pvc, perr := c.kclient.CoreV1().PersistentVolumeClaims(pvcNS).Get(ctx, pvcName, metav1.GetOptions{})
-		if perr != nil || pvc.Annotations[migrator.AnnotationMigrateNode] != "" {
+		if perr != nil || migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateNode) != "" {
 			continue
 		}
 
@@ -606,7 +606,8 @@ func (c *Controller) reconcileNode(ctx context.Context, name string) error {
 	c.recorder.Eventf(node, corev1.EventTypeNormal, "EvacuationRequested",
 		"requested migration of %d PVCs out of zone %s", stamped, zone)
 
-	// Consume the request annotation.
+	// Consume the request annotation (the patch helper clears the legacy
+	// variants too, so a legacy-stamped request cannot linger and re-trigger).
 	return c.patchNodeAnnotations(ctx, name, map[string]*string{
 		migrator.AnnotationEvacuate:      nil,
 		migrator.AnnotationEvacuateForce: nil,
@@ -636,7 +637,7 @@ func (c *Controller) reconcileFollow(ctx context.Context, key string) error {
 	}
 
 	// A migration is already requested, running, or terminally failed.
-	if pvc.Annotations[migrator.AnnotationMigrateNode] != "" || pvc.Spec.VolumeName == "" {
+	if migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateNode) != "" || pvc.Spec.VolumeName == "" {
 		return nil
 	}
 
@@ -856,7 +857,8 @@ func (c *Controller) evaluateReactivePVC(ctx context.Context, pod *corev1.Pod, n
 		}
 
 		klog.InfoS("Reactive evacuation skipped", "pvc", namespace+"/"+pvcName,
-			"annotation", pvc.Annotations[migrator.AnnotationReactiveEvacuation], "operatorOwned", owner != nil)
+			"annotation", migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationReactiveEvacuation),
+			"operatorOwned", owner != nil)
 
 		return nil
 	}
@@ -904,7 +906,7 @@ func (c *Controller) evaluateReactivePVC(ctx context.Context, pod *corev1.Pod, n
 // management — and the reactive path stamps migrate-force, which bypasses
 // PodDisruptionBudgets the operator relies on.
 func reactiveEvacuationAllowed(pvc *corev1.PersistentVolumeClaim) (bool, *metav1.OwnerReference) {
-	switch pvc.Annotations[migrator.AnnotationReactiveEvacuation] {
+	switch migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationReactiveEvacuation) {
 	case "true":
 		return true, nil
 	case "false":
@@ -982,11 +984,11 @@ func (c *Controller) zoneBlocked(ctx context.Context, region, zone string) (bool
 // migrationInFlight reports whether a migration is already requested or running
 // for the PVC (so a reactive trigger must not re-stamp it).
 func migrationInFlight(pvc *corev1.PersistentVolumeClaim) bool {
-	if pvc.Annotations[migrator.AnnotationMigrateNode] != "" {
+	if migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigrateNode) != "" {
 		return true
 	}
 
-	switch pvc.Annotations[migrator.AnnotationMigratePhase] {
+	switch migrator.GetAnnotation(pvc.Annotations, migrator.AnnotationMigratePhase) {
 	case migrator.PhasePending, migrator.PhaseDraining, migrator.PhaseMoving, migrator.PhaseRewiring:
 		return true
 	default:
@@ -1083,9 +1085,10 @@ func (c *Controller) failPVC(ctx context.Context, namespace, name, message strin
 	})
 }
 
-// patchPVCAnnotations merge-patches annotations on a PVC; nil values delete keys.
+// patchPVCAnnotations merge-patches annotations on a PVC; nil values delete
+// keys. The legacy variant of every touched key is deleted as well.
 func (c *Controller) patchPVCAnnotations(ctx context.Context, namespace, name string, annotations map[string]*string) error {
-	patch, err := annotationsPatch(annotations)
+	patch, err := annotationsPatch(withLegacyCleared(annotations))
 	if err != nil {
 		return err
 	}
@@ -1098,9 +1101,10 @@ func (c *Controller) patchPVCAnnotations(ctx context.Context, namespace, name st
 	return err
 }
 
-// patchNodeAnnotations merge-patches annotations on a Node; nil values delete keys.
+// patchNodeAnnotations merge-patches annotations on a Node; nil values delete
+// keys. The legacy variant of every touched key is deleted as well.
 func (c *Controller) patchNodeAnnotations(ctx context.Context, name string, annotations map[string]*string) error {
-	patch, err := annotationsPatch(annotations)
+	patch, err := annotationsPatch(withLegacyCleared(annotations))
 	if err != nil {
 		return err
 	}
@@ -1111,6 +1115,29 @@ func (c *Controller) patchNodeAnnotations(ctx context.Context, name string, anno
 	}
 
 	return err
+}
+
+// withLegacyCleared marks the legacy upstream variant of every canonical key
+// in the patch for deletion (unless the patch already addresses it). Writes
+// therefore land on the canonical keys only, and consuming or updating a key
+// always removes a legacy-stamped variant — a legacy request annotation can
+// never linger behind a canonical write and re-trigger a finished migration.
+func withLegacyCleared(annotations map[string]*string) map[string]*string {
+	legacies := make([]string, 0, len(annotations))
+
+	for key := range annotations {
+		if legacy := migrator.LegacyAnnotation(key); legacy != "" {
+			legacies = append(legacies, legacy)
+		}
+	}
+
+	for _, legacy := range legacies {
+		if _, explicit := annotations[legacy]; !explicit {
+			annotations[legacy] = nil
+		}
+	}
+
+	return annotations
 }
 
 func annotationsPatch(annotations map[string]*string) ([]byte, error) {

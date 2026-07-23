@@ -44,11 +44,23 @@ const (
 )
 
 const (
-	// Group name
-	Group = "proxmox.sinextra.dev"
+	// Group is the project's canonical annotation namespace group.
+	Group = "proxmox.crunchymonkies.com"
+
+	// GroupLegacy is the upstream author's annotation group, still read for
+	// backward compatibility.
+	//
+	// Deprecated: use Group. Legacy keys remain accepted on reads only.
+	GroupLegacy = "proxmox.sinextra.dev"
 
 	// AnnotationProxmoxInstanceID is the annotation used to store the Proxmox node virtual machine ID.
 	AnnotationProxmoxInstanceID = Group + "/instance-id"
+
+	// AnnotationProxmoxInstanceIDLegacy is the upstream variant of
+	// AnnotationProxmoxInstanceID, still read for backward compatibility.
+	//
+	// Deprecated: use AnnotationProxmoxInstanceID.
+	AnnotationProxmoxInstanceIDLegacy = GroupLegacy + "/instance-id"
 )
 
 // VMLocks is a structure that protects to multiple VMs changes.
@@ -99,30 +111,39 @@ func ParseEndpoint(endpoint string) (string, string, error) {
 }
 
 // ProxmoxVMIDbyNode returns the Proxmox VM ID from the specified kubernetes node.
+// The canonical instance-id annotation is read first, the legacy variant second.
 func ProxmoxVMIDbyNode(node *corev1.Node) (int, error) {
 	vmID, err := provider.GetVMID(node.Spec.ProviderID)
 	if err != nil {
-		if vmID, err := strconv.Atoi(node.Annotations[AnnotationProxmoxInstanceID]); err == nil {
-			return vmID, nil
+		for _, key := range []string{AnnotationProxmoxInstanceID, AnnotationProxmoxInstanceIDLegacy} {
+			if vmID, aerr := strconv.Atoi(node.Annotations[key]); aerr == nil {
+				return vmID, nil
+			}
 		}
 	}
 
 	return vmID, err
 }
 
-// GetNodeTopology extracts region and zone from the provided labels map.
+// GetNodeTopology extracts region and zone from the provided labels map: the
+// canonical proxmox labels first, the legacy upstream variants second, the
+// well-known kubernetes.io topology labels last.
 func GetNodeTopology(labels map[string]string) (region, zone string) {
-	region = labels[ProxmoxRegion]
-	if region == "" {
-		region = labels[corev1.LabelTopologyRegion]
-	}
-
-	zone = labels[ProxmoxNode]
-	if zone == "" {
-		zone = labels[corev1.LabelTopologyZone]
-	}
+	region = firstLabel(labels, ProxmoxRegion, ProxmoxRegionLegacy, corev1.LabelTopologyRegion)
+	zone = firstLabel(labels, ProxmoxNode, ProxmoxNodeLegacy, corev1.LabelTopologyZone)
 
 	return region, zone
+}
+
+// firstLabel returns the first non-empty value among keys.
+func firstLabel(labels map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if v := labels[key]; v != "" {
+			return v
+		}
+	}
+
+	return ""
 }
 
 func locationFromTopologyRequirement(tr *proto.TopologyRequirement) (region, zone string) {

@@ -48,35 +48,41 @@ import (
 // operators or producer tools (evacuate/rebalance), status annotations are
 // written by the migration controller, and the state annotation is stamped
 // on the PV to make a crashed migration resumable.
+//
+// The canonical keys live under the project's own namespace (csi.Group);
+// the legacy upstream-prefixed variants below remain accepted on reads (see
+// GetAnnotation) so existing stamps keep working. Only annotation keys
+// migrated to the new namespace — the CSI driver name (csi.DriverName) is
+// immutable plumbing baked into every provisioned PV and does not change.
 const (
 	// AnnotationMigrate is the legacy explicit enable flag.
-	AnnotationMigrate = csi.DriverName + "/migrate"
+	AnnotationMigrate = csi.Group + "/migrate"
 	// AnnotationMigrateNode requests a migration to the given Proxmox node (zone).
-	AnnotationMigrateNode = csi.DriverName + "/migrate-node"
+	AnnotationMigrateNode = csi.Group + "/migrate-node"
 	// AnnotationMigrateForce opts the PVC in to force-drain (cordon + pod delete).
-	AnnotationMigrateForce = csi.DriverName + "/migrate-force"
+	AnnotationMigrateForce = csi.Group + "/migrate-force"
 	// AnnotationMigrateStorage optionally selects a different storage on the
 	// target node (used when the source storage name does not exist there).
-	AnnotationMigrateStorage = csi.DriverName + "/migrate-storage"
+	AnnotationMigrateStorage = csi.Group + "/migrate-storage"
 
 	// AnnotationMigratePhase is the current phase of the migration.
-	AnnotationMigratePhase = csi.DriverName + "/migrate-phase"
+	AnnotationMigratePhase = csi.Group + "/migrate-phase"
 	// AnnotationMigrateMessage is the last error or progress message.
-	AnnotationMigrateMessage = csi.DriverName + "/migrate-message"
+	AnnotationMigrateMessage = csi.Group + "/migrate-message"
 	// AnnotationMigrateAttempts counts reconcile attempts.
-	AnnotationMigrateAttempts = csi.DriverName + "/migrate-attempts"
+	AnnotationMigrateAttempts = csi.Group + "/migrate-attempts"
 	// AnnotationMigrateStartedAt is the RFC3339 time the migration started.
-	AnnotationMigrateStartedAt = csi.DriverName + "/migrate-started-at"
+	AnnotationMigrateStartedAt = csi.Group + "/migrate-started-at"
 
 	// AnnotationMigrateState is stamped on the PV before the disk move so an
 	// interrupted migration can resume at the rewire step (PV survives PVC recreate).
-	AnnotationMigrateState = csi.DriverName + "/migrate-state"
+	AnnotationMigrateState = csi.Group + "/migrate-state"
 
 	// AnnotationEvacuate on a Kubernetes Node requests evacuation of all CSI
 	// volumes from the node's Proxmox zone. Value is a target zone or "auto".
-	AnnotationEvacuate = csi.DriverName + "/evacuate"
+	AnnotationEvacuate = csi.Group + "/evacuate"
 	// AnnotationEvacuateForce opts evacuated PVCs in to force-drain.
-	AnnotationEvacuateForce = csi.DriverName + "/evacuate-force"
+	AnnotationEvacuateForce = csi.Group + "/evacuate-force"
 
 	// AnnotationReactiveEvacuation on a PVC overrides the reactive-evacuation
 	// operator heuristic: "false" always skips the PVC (covers operators that
@@ -84,8 +90,103 @@ const (
 	// when the PVC is controller-owned by an operator's custom resource.
 	// Absent, the heuristic decides. It gates ONLY the reactive auto-trigger;
 	// explicit migrate-node requests and pvecsictl commands are never gated.
-	AnnotationReactiveEvacuation = csi.DriverName + "/reactive-evacuation"
+	AnnotationReactiveEvacuation = csi.Group + "/reactive-evacuation"
 )
+
+// Legacy annotation keys under the upstream csi.proxmox.sinextra.dev prefix.
+// Reads fall back to them (GetAnnotation) and the controller clears them
+// alongside the canonical keys when it consumes a request; writes use the
+// canonical keys only.
+const (
+	// AnnotationMigrateLegacy is the upstream variant of AnnotationMigrate.
+	//
+	// Deprecated: use AnnotationMigrate.
+	AnnotationMigrateLegacy = csi.DriverName + "/migrate"
+	// AnnotationMigrateNodeLegacy is the upstream variant of AnnotationMigrateNode.
+	//
+	// Deprecated: use AnnotationMigrateNode.
+	AnnotationMigrateNodeLegacy = csi.DriverName + "/migrate-node"
+	// AnnotationMigrateForceLegacy is the upstream variant of AnnotationMigrateForce.
+	//
+	// Deprecated: use AnnotationMigrateForce.
+	AnnotationMigrateForceLegacy = csi.DriverName + "/migrate-force"
+	// AnnotationMigrateStorageLegacy is the upstream variant of AnnotationMigrateStorage.
+	//
+	// Deprecated: use AnnotationMigrateStorage.
+	AnnotationMigrateStorageLegacy = csi.DriverName + "/migrate-storage"
+	// AnnotationMigratePhaseLegacy is the upstream variant of AnnotationMigratePhase.
+	//
+	// Deprecated: use AnnotationMigratePhase.
+	AnnotationMigratePhaseLegacy = csi.DriverName + "/migrate-phase"
+	// AnnotationMigrateMessageLegacy is the upstream variant of AnnotationMigrateMessage.
+	//
+	// Deprecated: use AnnotationMigrateMessage.
+	AnnotationMigrateMessageLegacy = csi.DriverName + "/migrate-message"
+	// AnnotationMigrateAttemptsLegacy is the upstream variant of AnnotationMigrateAttempts.
+	//
+	// Deprecated: use AnnotationMigrateAttempts.
+	AnnotationMigrateAttemptsLegacy = csi.DriverName + "/migrate-attempts"
+	// AnnotationMigrateStartedAtLegacy is the upstream variant of AnnotationMigrateStartedAt.
+	//
+	// Deprecated: use AnnotationMigrateStartedAt.
+	AnnotationMigrateStartedAtLegacy = csi.DriverName + "/migrate-started-at"
+	// AnnotationMigrateStateLegacy is the upstream variant of AnnotationMigrateState.
+	//
+	// Deprecated: use AnnotationMigrateState.
+	AnnotationMigrateStateLegacy = csi.DriverName + "/migrate-state"
+	// AnnotationEvacuateLegacy is the upstream variant of AnnotationEvacuate.
+	//
+	// Deprecated: use AnnotationEvacuate.
+	AnnotationEvacuateLegacy = csi.DriverName + "/evacuate"
+	// AnnotationEvacuateForceLegacy is the upstream variant of AnnotationEvacuateForce.
+	//
+	// Deprecated: use AnnotationEvacuateForce.
+	AnnotationEvacuateForceLegacy = csi.DriverName + "/evacuate-force"
+	// AnnotationReactiveEvacuationLegacy is the upstream variant of AnnotationReactiveEvacuation.
+	//
+	// Deprecated: use AnnotationReactiveEvacuation.
+	AnnotationReactiveEvacuationLegacy = csi.DriverName + "/reactive-evacuation"
+)
+
+// legacyAnnotationAliases maps every canonical migration-protocol key to the
+// legacy upstream-prefixed variant that remains accepted on reads.
+//
+//nolint:staticcheck // the deprecated aliases are referenced on purpose: they ARE the compatibility surface
+var legacyAnnotationAliases = map[string]string{
+	AnnotationMigrate:          AnnotationMigrateLegacy,
+	AnnotationMigrateNode:      AnnotationMigrateNodeLegacy,
+	AnnotationMigrateForce:     AnnotationMigrateForceLegacy,
+	AnnotationMigrateStorage:   AnnotationMigrateStorageLegacy,
+	AnnotationMigratePhase:     AnnotationMigratePhaseLegacy,
+	AnnotationMigrateMessage:   AnnotationMigrateMessageLegacy,
+	AnnotationMigrateAttempts:  AnnotationMigrateAttemptsLegacy,
+	AnnotationMigrateStartedAt: AnnotationMigrateStartedAtLegacy,
+	AnnotationMigrateState:     AnnotationMigrateStateLegacy,
+	AnnotationEvacuate:         AnnotationEvacuateLegacy,
+	AnnotationEvacuateForce:    AnnotationEvacuateForceLegacy,
+
+	// The controller never writes this one — it is an admin-set override — so it
+	// only ever travels the read half of the compatibility surface.
+	AnnotationReactiveEvacuation: AnnotationReactiveEvacuationLegacy,
+}
+
+// GetAnnotation reads a migration-protocol annotation with dual-read
+// compatibility: the canonical (proxmox.crunchymonkies.com) key first,
+// falling back to the legacy upstream variant when the canonical key is
+// absent or empty.
+func GetAnnotation(annotations map[string]string, key string) string {
+	if v := annotations[key]; v != "" {
+		return v
+	}
+
+	return annotations[LegacyAnnotation(key)]
+}
+
+// LegacyAnnotation returns the legacy upstream variant of a canonical
+// migration-protocol key, or "" when the key has none.
+func LegacyAnnotation(key string) string {
+	return legacyAnnotationAliases[key]
+}
 
 // Migration phases reported via AnnotationMigratePhase.
 const (
@@ -263,7 +364,7 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 	// disk, but crashed before rewiring the PV/PVC topology.
 	skipMove := false
 
-	if kubePV.Annotations[AnnotationMigrateState] == req.TargetNode {
+	if GetAnnotation(kubePV.Annotations, AnnotationMigrateState) == req.TargetNode {
 		onTarget, size, derr := toolsproxmox.DiskOnNode(ctx, cluster, targetVol, req.TargetNode)
 
 		switch {
