@@ -164,8 +164,19 @@ The trigger is deliberately narrow to avoid false positives. A migration is stam
 2. The pod references a PVC bound to a PV provisioned by this driver, whose zone maps to a node that is **cordoned** (`spec.unschedulable`) or carries a `NoSchedule`/`NoExecute` **taint**.
 3. **No schedulable node** satisfies the volume's zone — i.e. the pinned zone's node really is the drained one, not merely one of several. If a schedulable node in the zone exists, the pod is stuck for some other reason (e.g. insufficient resources) and nothing is done.
 4. The PVC is **not already mid-migration** (no `migrate-node` request and no in-flight `migrate-phase`).
+5. The PVC's storage is **not operator-managed** (see below), unless overridden by annotation.
 
 When all hold, the target is chosen by free capacity/headroom (the same `auto` selector as evacuation, including its per-zone-storage-name handling via the driver's StorageClasses) and `migrate-node` + `migrate-force` — plus `migrate-storage` when the target zone does not host the source storage name — are stamped on the PVC, emitting a `ReactiveEvacuation` event. If no candidate zone has capacity, a warning event listing the considered storages is emitted and nothing is stamped (no thrashing).
+
+**Operator-managed storage is skipped by default.** If the PVC has a controller `ownerReference` whose owner is a **custom resource** — the owner's `apiVersion` group is not core (`""`), `apps`, or `batch` — the PVC is treated as operator-managed and the reactive trigger skips it, emitting a `ReactiveEvacuationSkipped` event naming the owner. Operators like CloudNativePG own their PVCs' lifecycle and ship native storage-move procedures (replica rebuild, switchover); copying the disk underneath them risks a split-brain with the operator's own state management — and the reactive path stamps `migrate-force`, which bypasses the PodDisruptionBudgets such operators rely on. Built-in workload owners (e.g. an `apps/v1` StatefulSet) do not count as operators. The `csi.proxmox.sinextra.dev/reactive-evacuation` annotation on the PVC overrides the heuristic in both directions:
+
+| `csi.proxmox.sinextra.dev/reactive-evacuation` | Effect |
+|---|---|
+| `"false"` | Always skip the PVC — protects operators that set no `ownerReferences` on their PVCs |
+| `"true"` | Allow reactive evacuation even when the PVC is operator-owned (the admin knows best) |
+| absent | The ownerReference heuristic decides |
+
+This gate applies **only to the reactive auto-trigger**: explicit `migrate-node` annotations (stamped by an admin or an operator) and `pvecsictl` commands are never gated — explicit intent wins.
 
 **Grace period.** To avoid turning a quick maintenance cordon+reboot into a large disk copy, the trigger waits a configurable grace period (`--reactive-evacuation-grace`, default `2m`) measured from the pod's `PodScheduled` transition time (falling back to the pod's creation time). While inside the window the pod is requeued and re-checked; it only fires once the pod has stayed unschedulable past the grace period. A cordon-only maintenance that evicts nothing (no `Pending` pod) never triggers; a real drain that leaves a pod stuck past the window does.
 

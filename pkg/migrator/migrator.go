@@ -77,6 +77,14 @@ const (
 	AnnotationEvacuate = csi.DriverName + "/evacuate"
 	// AnnotationEvacuateForce opts evacuated PVCs in to force-drain.
 	AnnotationEvacuateForce = csi.DriverName + "/evacuate-force"
+
+	// AnnotationReactiveEvacuation on a PVC overrides the reactive-evacuation
+	// operator heuristic: "false" always skips the PVC (covers operators that
+	// set no ownerReferences), "true" allows the reactive auto-trigger even
+	// when the PVC is controller-owned by an operator's custom resource.
+	// Absent, the heuristic decides. It gates ONLY the reactive auto-trigger;
+	// explicit migrate-node requests and pvecsictl commands are never gated.
+	AnnotationReactiveEvacuation = csi.DriverName + "/reactive-evacuation"
 )
 
 // Migration phases reported via AnnotationMigratePhase.
