@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi"
@@ -843,6 +844,23 @@ func (c *Controller) evaluateReactivePVC(ctx context.Context, pod *corev1.Pod, n
 		return nil
 	}
 
+	// Operator gate: the reactive auto-trigger skips PVCs whose storage
+	// lifecycle belongs to an operator, unless overridden by annotation. This
+	// gates ONLY the auto-trigger — explicit migrate-node requests and
+	// pvecsictl commands are untouched (explicit intent wins).
+	if allowed, owner := reactiveEvacuationAllowed(pvc); !allowed {
+		if owner != nil {
+			c.recorder.Eventf(pvc, corev1.EventTypeNormal, "ReactiveEvacuationSkipped",
+				"PVC is controller-owned by %s %s (%s): storage is operator-managed; migrate via the operator or set %s=true",
+				owner.Kind, owner.Name, owner.APIVersion, migrator.AnnotationReactiveEvacuation)
+		}
+
+		klog.InfoS("Reactive evacuation skipped", "pvc", namespace+"/"+pvcName,
+			"annotation", pvc.Annotations[migrator.AnnotationReactiveEvacuation], "operatorOwned", owner != nil)
+
+		return nil
+	}
+
 	target, targetStorage, err := c.autoTarget(ctx, pv, vol.Zone())
 	if err != nil {
 		c.recorder.Eventf(pvc, corev1.EventTypeWarning, "ReactiveEvacuation",
@@ -872,6 +890,61 @@ func (c *Controller) evaluateReactivePVC(ctx context.Context, pod *corev1.Pod, n
 	}
 
 	return c.patchPVCAnnotations(ctx, namespace, pvcName, annotations)
+}
+
+// reactiveEvacuationAllowed decides whether the reactive auto-trigger may
+// stamp a migration on the PVC, returning the operator owner it is skipped
+// for (nil when the decision came from the annotation). The explicit
+// AnnotationReactiveEvacuation wins in both directions: "false" always skips
+// (covering operators that set no ownerReferences on their PVCs) and "true"
+// always allows (the admin knows best). Absent, the heuristic skips PVCs
+// controller-owned by a custom resource: operators like CloudNativePG own
+// their PVCs' lifecycle and ship native storage-move procedures, so copying
+// the disk underneath them risks a split-brain with the operator's own state
+// management — and the reactive path stamps migrate-force, which bypasses
+// PodDisruptionBudgets the operator relies on.
+func reactiveEvacuationAllowed(pvc *corev1.PersistentVolumeClaim) (bool, *metav1.OwnerReference) {
+	switch pvc.Annotations[migrator.AnnotationReactiveEvacuation] {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+
+	if owner := customResourceController(pvc); owner != nil {
+		return false, owner
+	}
+
+	return true, nil
+}
+
+// customResourceController returns the PVC's controller ownerReference when
+// that owner is a custom resource — an apiVersion group outside core (""),
+// "apps" and "batch" — marking the PVC as operator-managed. Built-in workload
+// owners (e.g. an apps/v1 StatefulSet) do not count: they have no storage
+// orchestration of their own that a disk copy could conflict with.
+func customResourceController(pvc *corev1.PersistentVolumeClaim) *metav1.OwnerReference {
+	for i := range pvc.OwnerReferences {
+		ref := &pvc.OwnerReferences[i]
+
+		if ref.Controller == nil || !*ref.Controller {
+			continue
+		}
+
+		group := ""
+		if idx := strings.Index(ref.APIVersion, "/"); idx >= 0 {
+			group = ref.APIVersion[:idx]
+		}
+
+		switch group {
+		case "", "apps", "batch":
+			return nil
+		default:
+			return ref
+		}
+	}
+
+	return nil
 }
 
 // zoneBlocked reports whether every node in the given region/zone is

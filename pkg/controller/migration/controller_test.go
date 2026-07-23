@@ -1062,3 +1062,109 @@ func TestEnqueueFilters(t *testing.T) {
 	c.enqueuePodPVCs(newPodOn("test-0", "cluster-1-node-2"))
 	assert.Equal(t, 1, c.followQueue.Len(), "scheduled pod with a PVC must be enqueued")
 }
+
+// ownedPVC returns the test PVC with a controller ownerReference of the given
+// apiVersion/kind (the shape an operator or workload controller stamps).
+func ownedPVC(apiVersion, kind string, annotations map[string]string) *corev1.PersistentVolumeClaim {
+	pvc := newPVC(annotations)
+	controller := true
+	pvc.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion: apiVersion,
+		Kind:       kind,
+		Name:       "db-1",
+		UID:        "11111111-2222-3333-4444-555555555555",
+		Controller: &controller,
+	}}
+
+	return pvc
+}
+
+func TestReconcileReactiveOperatorOwnedSkips(t *testing.T) {
+	// The PVC is controller-owned by a custom resource (an operator's CR):
+	// the reactive auto-trigger must skip it and say why. No Proxmox
+	// responders are registered — reaching autoTarget would fail, proving the
+	// gate fires before any stamping work.
+	c, _, recorder := newReactiveController(t,
+		ownedPVC("postgresql.example.io/v1", "Cluster", nil),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode], "an operator-owned PVC must not be reactively migrated")
+
+	event := <-recorder.Events
+	assert.Contains(t, event, "ReactiveEvacuationSkipped")
+	assert.Contains(t, event, "Cluster")
+	assert.Contains(t, event, "postgresql.example.io/v1")
+	assert.Contains(t, event, migrator.AnnotationReactiveEvacuation)
+}
+
+func TestReconcileReactiveOperatorOwnedOverride(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// Same operator-owned PVC, but the admin explicitly allowed reactive
+	// evacuation: the annotation overrides the heuristic.
+	c, _, recorder := newReactiveController(t,
+		ownedPVC("postgresql.example.io/v1", "Cluster",
+			map[string]string{migrator.AnnotationReactiveEvacuation: "true"}),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode])
+	assert.Equal(t, "true", pvc.Annotations[migrator.AnnotationMigrateForce])
+
+	event := <-recorder.Events
+	assert.Contains(t, event, "ReactiveEvacuation")
+}
+
+func TestReconcileReactiveStatefulSetOwned(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	// A built-in workload owner (apps group) is NOT an operator: StatefulSets
+	// have no storage orchestration of their own, so reactive evacuation
+	// proceeds. (StatefulSet PVCs usually carry no ownerReference at all;
+	// this covers the apps-group case explicitly.)
+	c, _, _ := newReactiveController(t,
+		ownedPVC("apps/v1", "StatefulSet", nil),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode], "a StatefulSet-owned PVC must still be reactively migrated")
+}
+
+func TestReconcileReactiveAnnotationFalse(t *testing.T) {
+	// No ownerReference at all, but the admin opted the PVC out explicitly —
+	// the way to protect operators that do not stamp ownerReferences. No
+	// Proxmox responders: the gate must fire before autoTarget.
+	c, _, _ := newReactiveController(t,
+		newPVC(map[string]string{migrator.AnnotationReactiveEvacuation: "false"}),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode], "reactive-evacuation=false must always skip")
+}
