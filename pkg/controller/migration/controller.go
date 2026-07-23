@@ -392,11 +392,21 @@ func (c *Controller) reconcilePVC(ctx context.Context, key string) error {
 		return nil
 	}
 
-	// Already on target? Mark completed and strip the request.
+	// Requested storage, if any. A same-node request that also asks for a
+	// different storage is a real storage move, not an already-on-target no-op.
+	reqStorage := pvc.Annotations[migrator.AnnotationMigrateStorage]
+
+	// Already on target? Mark completed and strip the request. This only holds
+	// when the volume is TRULY already on target: it is in the requested zone
+	// AND the requested storage matches the volume's current storage (or no
+	// storage was requested). When a different storage is requested we must NOT
+	// short-circuit — a same-node cross-storage move is a genuine migration that
+	// the migrator performs, so fall through to the normal migration path.
 	if pvc.Spec.VolumeName != "" {
 		pv, perr := c.kclient.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 		if perr == nil && pv.Spec.CSI != nil {
-			if vol, verr := volume.NewVolumeFromVolumeID(pv.Spec.CSI.VolumeHandle); verr == nil && vol.Zone() == target {
+			if vol, verr := volume.NewVolumeFromVolumeID(pv.Spec.CSI.VolumeHandle); verr == nil &&
+				vol.Zone() == target && (reqStorage == "" || reqStorage == vol.Storage()) {
 				return c.patchPVCAnnotations(ctx, namespace, name, map[string]*string{
 					migrator.AnnotationMigrateNode:    nil,
 					migrator.AnnotationMigrateForce:   nil,
