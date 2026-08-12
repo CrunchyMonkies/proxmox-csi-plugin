@@ -65,11 +65,14 @@ existingConfigSecretKey: config.yaml
 configFile: /etc/proxmox/config.yaml
 
 # -- Proxmox cluster config.
-# ref: https://github.com/sergelogvinov/proxmox-csi-plugin/blob/main/docs/install.md
+# ref: https://github.com/CrunchyMonkies/proxmox-csi-plugin/blob/main/docs/install.md
 config:
   features:
     # specify provider: proxmox if you are using capmox (cluster api provider for proxmox)
     provider: "default"
+    # reassign a volume's Proxmox ownership (vmid) to the real VM on attach.
+    # default is false: see docs/reassign-volume-on-attach.md before enabling.
+    # reassignVolumeOnAttach: false
   clusters: []
   #   - url: https://cluster-api-1.exmple.com:8006/api2/json
   #     insecure: false

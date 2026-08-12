@@ -25,6 +25,16 @@ import (
 
 var vmidre = regexp.MustCompile(`(^|-|/)vm-([1-9][0-9]{2,8})(-|$)`)
 
+// diskre splits a Proxmox disk name into the parts that change when a volume is
+// reassigned to another VM and the part that does not.
+//
+// Group 1 is the directory plugin's optional '<vmid>/' component, group 2 the
+// vmid encoded in the filename, group 3 the stable suffix ('pvc-<uuid>.raw').
+// Both vmids are rewritten by a rename; the suffix survives it, which is what
+// makes it usable as an identity for a volume whose name no longer matches the
+// VolumeID Kubernetes stored.
+var diskre = regexp.MustCompile(`^(?:([1-9][0-9]{2,8})/)?vm-([1-9][0-9]{2,8})-(.+)$`)
+
 // Volume is the volume ID type.
 type Volume struct {
 	region  string
@@ -143,6 +153,57 @@ func (v *Volume) VMID() string {
 	}
 
 	return matches[2]
+}
+
+// DiskName function returns the disk name without the directory plugin's
+// leading '<vmid>/' component, ie the bare filename Proxmox stores it under.
+func (v *Volume) DiskName() string {
+	if i := strings.LastIndex(v.disk, "/"); i != -1 {
+		return v.disk[i+1:]
+	}
+
+	return v.disk
+}
+
+// DiskSuffix function returns the part of the disk name that a reassignment to
+// another VM does not change: 'pvc-<uuid>.raw' out of '9999/vm-9999-pvc-<uuid>.raw'.
+//
+// It is empty for any disk not in Proxmox's 'vm-<vmid>-<name>' form (a linked
+// clone's 'base-100-disk-0', say), which is the signal that the volume cannot be
+// tracked across a rename and must be matched by its full name instead.
+func (v *Volume) DiskSuffix() string {
+	matches := diskre.FindStringSubmatch(v.disk)
+	if matches == nil {
+		return ""
+	}
+
+	return matches[3]
+}
+
+// WithVMID function returns a copy of the volume named for another vmid,
+// preserving whichever of the two name shapes the original used.
+//
+// It returns nil if the disk name is not in the 'vm-<vmid>-<name>' form, ie
+// exactly when DiskSuffix is empty: there is no correct new name to construct,
+// and returning the volume unchanged would turn a rename into a silent no-op.
+func (v *Volume) WithVMID(vmid int) *Volume {
+	matches := diskre.FindStringSubmatch(v.disk)
+	if matches == nil {
+		return nil
+	}
+
+	disk := fmt.Sprintf("vm-%d-%s", vmid, matches[3])
+	if matches[1] != "" {
+		disk = fmt.Sprintf("%d/%s", vmid, disk)
+	}
+
+	return &Volume{
+		region:  v.region,
+		zone:    v.zone,
+		node:    v.node,
+		storage: v.storage,
+		disk:    disk,
+	}
 }
 
 // PV function returns the kubernetes Persistent Volume (PV) name associated with the volume.

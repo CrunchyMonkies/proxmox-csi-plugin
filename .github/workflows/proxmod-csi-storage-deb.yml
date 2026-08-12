@@ -1,13 +1,13 @@
-name: pve-csi-copy deb
+name: proxmod-csi-storage deb
 
 on:
   push:
     tags:
-      - 'pve-csi-copy-v*'
+      - 'proxmod-csi-storage-v*'
   pull_request:
     paths:
-      - 'hack/pve-token-copy/**'
-      - '.github/workflows/pve-csi-copy-deb.yml'
+      - 'hack/proxmod-csi-storage/**'
+      - '.github/workflows/proxmod-csi-storage-deb.yml'
   workflow_dispatch:
 
 permissions:
@@ -29,24 +29,28 @@ jobs:
             build-essential debhelper dpkg-dev devscripts lintian perl
 
       - name: Static checks
-        working-directory: hack/pve-token-copy
+        working-directory: hack/proxmod-csi-storage
         run: |
-          perl -c perl/PVECSICopy.pm
-          perl -c perl/PVECSICopy/Impl.pm
-          perl t/volname.t
-          bash -n install.sh
-          sh -n pkg/pve-csi-copy-verify
-          for f in debian/postinst debian/prerm debian/postrm; do sh -n "$f"; done
+          make build
+          python3 -c '
+          import json, re, sys
+          src = open("conf/50-proxmox-csi-storage.conf").read()
+          m = json.loads(re.sub(r"^\s*//.*$", "", src, flags=re.M))
+          assert m["id"] == "csi-storage", m["id"]
+          assert m["backend"]["module"] == "ProxmodExt::CSIStorage", m["backend"]
+          print("manifest ok:", m["id"], m.get("version"))
+          '
 
       - name: Build deb
-        working-directory: hack/pve-token-copy
+        working-directory: hack/proxmod-csi-storage
         run: dpkg-buildpackage -b -us -uc
 
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          mv hack/pve-csi-copy_*.deb dist/
+          mv hack/proxmox-csi-storage_*.deb dist/
           ls -l dist
+          dpkg-deb -c dist/*.deb
 
       - name: Lintian (informational)
         run: lintian dist/*.deb || true
@@ -54,7 +58,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pve-csi-copy-deb
+          name: proxmod-csi-storage-deb
           path: dist/*.deb
           if-no-files-found: error
 

@@ -89,9 +89,19 @@ clusters:
     ...
 ```
 
-Alternatively, install the [`pve-csi-copy`](../hack/pve-token-copy/) package on the
-Proxmox nodes and pass `--token-copy-endpoint`; the copy then runs through a
-permission-gated endpoint and a scoped API token is sufficient (no `root@pam`):
+Alternatively, install a permission-gated copy endpoint on the Proxmox nodes; the
+copy then runs through it and a scoped API token is sufficient (no `root@pam`).
+Two implementations, identical credential requirements:
+
+* [`proxmox-csi-storage`](../hack/proxmod-csi-storage/) (plus `proxmod`) with
+  `--proxmod-endpoint` — **recommended**, registers via proxmod's supported
+  extension mechanism.
+* [`pve-csi-copy`](../hack/pve-token-copy/) with `--token-copy-endpoint` — the
+  original self-contained hack, still supported.
+
+`--proxmod-endpoint` wins if both are given. Per-cluster overrides
+(`proxmod_endpoint` / `token_copy_endpoint`) let a mixed fleet use different
+endpoints per cluster:
 
 ```yaml
 clusters:

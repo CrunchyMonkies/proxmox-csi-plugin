@@ -1,6 +1,6 @@
 # proxmox-csi-plugin
 
-![Version: 0.7.1](https://img.shields.io/badge/Version-0.8.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.19.1-1.2.0](https://img.shields.io/badge/AppVersion-v0.19.1--1.2.0-informational?style=flat-square)
+![Version: 0.9.0](https://img.shields.io/badge/Version-0.9.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.19.1-1.3.0](https://img.shields.io/badge/AppVersion-v0.19.1--1.3.0-informational?style=flat-square)
 
 Container Storage Interface plugin for Proxmox
 
@@ -106,6 +106,7 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | priorityClassName | string | `"system-cluster-critical"` | Controller pods priorityClassName. |
 | serviceAccount | object | `{"annotations":{},"create":true,"name":""}` | Pods Service Account. ref: https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/ |
 | provisionerName | string | `"csi.proxmox.sinextra.dev"` | CSI Driver provisioner name. Currently, cannot be customized. |
+| csidriver.fsGroupPolicy | string | `"None"` | fsGroupPolicy controls whether kubelet recursively applies the pod's fsGroup to the volume. `None` disables it (volumes keep their own permissions); use the `rootDirPermissions` StorageClass parameter to make fresh volumes writable by non-root pods. `ReadWriteOnceWithFSType` (the previous default) breaks workloads such as Postgres that reject group-writable data directories. Note: this field is immutable on an existing CSIDriver; changing it requires recreating the object. |
 | clusterID | string | `"kubernetes"` | Cluster name. Currently, cannot be customized. |
 | logVerbosityLevel | int | `5` | Log verbosity level. See https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md for description of individual verbosity levels. |
 | timeout | string | `"3m"` | Connection timeout between sidecars. |
@@ -162,3 +163,34 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | affinity | object | `{}` | Affinity for controller assignment. ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity |
 | extraVolumes | list | `[]` | Additional volumes for Pods |
 | extraVolumeMounts | list | `[]` |  |
+| migrator | object | `{"config":{"clusters":[]},"detachTimeout":"5m","drainTimeout":"10m","enabled":false,"existingConfigSecret":null,"existingConfigSecretKey":"config.yaml","extraArgs":[],"helperVMID":9998,"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/pvecsictl","tag":""},"leaderElection":true,"maxAttempts":5,"metrics":{"enabled":false,"port":8081},"podFollow":false,"reactiveEvacuation":{"enabled":false,"grace":"2m"},"rebalance":{"enabled":false,"extraArgs":[],"highThreshold":0.8,"lowThreshold":0.6,"maxMigrations":2,"schedule":"0 3 * * *","window":"","windowTz":"UTC"},"replicaCount":1,"resources":{"requests":{"cpu":"10m","memory":"32Mi"}},"taskTimeout":10800}` | Volume migration controller (pvecsictl controller). Watches PVCs for csi.proxmox.sinextra.dev/migrate-node annotations and Nodes for csi.proxmox.sinextra.dev/evacuate annotations, and migrates the backing Proxmox disks automatically. Requires Proxmox root credentials. |
+| migrator.enabled | bool | `false` | Enable the migration controller deployment. |
+| migrator.replicaCount | int | `1` | Number of replicas; leader election ensures only one acts. |
+| migrator.image.repository | string | `"ghcr.io/crunchymonkies/pvecsictl"` | Migrator (pvecsictl) image. |
+| migrator.image.tag | string | `""` | Overrides the image tag whose default is the chart appVersion. |
+| migrator.image.pullPolicy | string | `"IfNotPresent"` | Always or IfNotPresent. |
+| migrator.config | object | `{"clusters":[]}` | Proxmox cluster config with ROOT credentials (username/password), the same schema as `config`. Token auth is not sufficient for disk migration. Stored in a separate secret from the CSI controller config. |
+| migrator.existingConfigSecret | string | `nil` | Existing secret name for the migrator cloud config (overrides `migrator.config`). |
+| migrator.existingConfigSecretKey | string | `"config.yaml"` | Existing secret key for the migrator cloud config. |
+| migrator.leaderElection | bool | `true` | Enable leader election. |
+| migrator.podFollow | bool | `false` | Volume follows pods: automatically migrate a volume when every pod mounting it has been scheduled in a different zone (e.g. after VM migration). Storage is matched by name, falling back to the cluster's `primary_storage` map. |
+| migrator.reactiveEvacuation | object | `{"enabled":false,"grace":"2m"}` | Reactive node evacuation: make a standard `kubectl drain` transparent for zone-local volumes. When a pod cannot be scheduled because its volume is pinned to a cordoned/tainted node, the controller migrates the volume so the pod can schedule elsewhere. kubectl drain still owns stateless pod eviction and PDBs; this only moves the volume. Opt-in and conservative. |
+| migrator.reactiveEvacuation.enabled | bool | `false` | Enable reactive evacuation. |
+| migrator.reactiveEvacuation.grace | string | `"2m"` | How long a pod must stay unschedulable before a migration is stamped. Prevents a quick maintenance cordon+reboot from triggering a large copy. |
+| migrator.maxAttempts | int | `5` | Maximum migration attempts per PVC before marking it Failed. |
+| migrator.helperVMID | int | `9998` | VM ID of the transient helper VM used to convert qcow2/vmdk volumes to raw during migration. Must be a free VM ID and must differ from the controller VMID. |
+| migrator.taskTimeout | int | `10800` | Proxmox disk move task timeout in seconds. |
+| migrator.drainTimeout | string | `"10m"` | Maximum time to wait for pods to terminate during force-drain. |
+| migrator.detachTimeout | string | `"5m"` | Maximum time to wait for a disk to detach from a VM. |
+| migrator.metrics | object | `{"enabled":false,"port":8081}` | Prometheus metrics for the migrator. |
+| migrator.extraArgs | list | `[]` | Additional migrator container arguments. |
+| migrator.resources | object | `{"requests":{"cpu":"10m","memory":"32Mi"}}` | Migrator resource requests and limits. |
+| migrator.rebalance | object | `{"enabled":false,"extraArgs":[],"highThreshold":0.8,"lowThreshold":0.6,"maxMigrations":2,"schedule":"0 3 * * *","window":"","windowTz":"UTC"}` | Scheduled rebalancing of idle volumes from overloaded Proxmox nodes. |
+| migrator.rebalance.enabled | bool | `false` | Enable the rebalance CronJob. |
+| migrator.rebalance.schedule | string | `"0 3 * * *"` | Rebalance schedule (cron format). |
+| migrator.rebalance.highThreshold | float | `0.8` | Zones above this used fraction are rebalancing sources. |
+| migrator.rebalance.lowThreshold | float | `0.6` | Only zones below this used fraction are rebalancing targets. |
+| migrator.rebalance.maxMigrations | int | `2` | Maximum volumes to move per run. |
+| migrator.rebalance.window | string | `""` | Maintenance window "HH:MM-HH:MM"; outside it the job exits immediately. |
+| migrator.rebalance.windowTz | string | `"UTC"` | IANA time zone for the maintenance window. |
+| migrator.rebalance.extraArgs | list | `[]` | Additional rebalance arguments. |

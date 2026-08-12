@@ -106,6 +106,7 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 	taskTimeout, _ := flags.GetInt("timeout")                    //nolint: errcheck
 	helperVMID, _ := flags.GetInt("helper-vmid")                 //nolint: errcheck
 	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
+	proxmodEndpoint, _ := flags.GetBool(flagProxmodEndpoint)     //nolint: errcheck
 
 	ctx := context.Background()
 	zone := args[0]
@@ -240,6 +241,7 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 		Logger:            logger,
 		HelperVMID:        helperVMID,
 		TokenCopyEndpoint: tokenCopyEndpoint,
+		ProxmodEndpoint:   proxmodEndpoint,
 	}
 
 	failures := 0
@@ -314,11 +316,14 @@ func (c *evacuateCmd) evacuateValidate(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Synchronous migration moves disks through the Proxmox API and needs copy
-	// credentials (root@pam, or an API token with --token-copy-endpoint);
+	// credentials (root@pam, or an API token with --token-copy-endpoint or
+	// --proxmod-endpoint);
 	// annotation mode only needs API read access.
 	if now, _ := flags.GetBool("now"); now { //nolint: errcheck
 		tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
-		if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint); err != nil {
+		proxmodEndpoint, _ := flags.GetBool(flagProxmodEndpoint)     //nolint: errcheck
+
+		if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint, proxmodEndpoint); err != nil {
 			return err
 		}
 	}

@@ -1,3 +1,17 @@
+pve-csi-copy (0.4.0) unstable; urgency=medium
+
+  * Accept directory-plugin volnames. The volname allow-list applied to both
+    the source `volume` parameter and the target volname rejected '/', but
+    file-backed storages name every volume '<vmid>/<name>.<ext>' — so
+    directory-storage copies were rejected outright, and proxmox-csi-plugin's
+    snapshot path (which always produces that shape when the disk has a file
+    extension) could not use this endpoint at all. The pattern now admits one
+    optional leading '<vmid>/' component, where <vmid> is PVE's VMID range and
+    nothing else; ':', '..', absolute paths and deeper nesting stay rejected.
+    maxLength raised 128 -> 160 to fit the prefix.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Wed, 12 Aug 2026 00:00:00 +0000
+
 pve-csi-copy (0.3.0) unstable; urgency=medium
 
   * Fix endpoint that never loaded: pvedaemon/pveproxy run `perl -T` (taint

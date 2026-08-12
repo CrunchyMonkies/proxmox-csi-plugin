@@ -1,0 +1,47 @@
+proxmox-csi-storage (0.3.0) unstable; urgency=medium
+
+  * Add a `rename` endpoint, wrapping PVE::Storage::rename_volume. It is the
+    only mechanism PVE has for reassigning an *unattached* volume to another
+    vmid, and it has no REST endpoint of its own — which is why
+    proxmox-csi-plugin's `features.reassignVolumeOnAttach` could not work
+    against move_disk (that method moves a disk key between two REAL VMs, and
+    the CSI placeholder vmid 9999 is not a VM). Synchronous: a rename is an
+    in-directory rename(2) on dir/LVM/ZFS, so there is no worker to fork.
+  * rename_volume performs no in-use check of its own, so the endpoint supplies
+    one: it walks the cluster vmlist and refuses if any qemu or lxc config
+    references the source volume. A pure `unused<n>` reference is tolerated —
+    that is the residue the CSI driver's own detach leaves behind, and it
+    removes it after the rename — but an attached disk, a pending change or a
+    snapshot reference is refused. Failure to read any config is fatal, so the
+    scan fails closed.
+  * ACLs match what move_disk itself enforces, so no new privilege class is
+    introduced: Datastore.Audit (declared) plus, in code, check_volume_access on
+    the source, Datastore.AllocateSpace on the storage, and VM.Config.Disk on
+    /vms/<target_vmid>.
+  * The rename target volname is validated by a stricter allow-list than the
+    source: PVE::Storage::Plugin::rename_volume composes the destination path
+    itself as "<basedir>/<target_vmid>/<target_volname>", so the '<vmid>/' shape
+    that is legitimate for a source volname would be a traversal here.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Wed, 12 Aug 2026 00:00:00 +0000
+
+proxmox-csi-storage (0.2.0) unstable; urgency=medium
+
+  * Accept directory-plugin volnames. The volname allow-list applied to both
+    the source `volume` parameter and the target volname rejected '/', but
+    file-backed storages name every volume '<vmid>/<name>.<ext>' — so
+    directory-storage copies were rejected outright, and proxmox-csi-plugin's
+    snapshot path (which always produces that shape when the disk has a file
+    extension) could not use this endpoint at all. The pattern now admits one
+    optional leading '<vmid>/' component, where <vmid> is PVE's VMID range and
+    nothing else; ':', '..', absolute paths and deeper nesting stay rejected.
+    maxLength raised 128 -> 160 to fit the prefix.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Wed, 12 Aug 2026 00:00:00 +0000
+
+proxmox-csi-storage (0.1.0) unstable; urgency=medium
+
+  * Initial release: token-authorised copy endpoint for proxmox-csi-plugin,
+    as a proxmod extension. Supersedes the pve-csi-copy systemd-wrapper hack.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Wed, 12 Aug 2026 00:00:00 +0000

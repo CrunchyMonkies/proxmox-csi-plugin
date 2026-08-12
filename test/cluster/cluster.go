@@ -17,8 +17,10 @@ limitations under the License.
 package cluster
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/jarcoal/httpmock"
 	"github.com/luthermonson/go-proxmox"
@@ -26,8 +28,51 @@ import (
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi"
 )
 
+// RenameRequest is one call the driver made to the proxmod rename endpoint.
+type RenameRequest struct {
+	Node          string
+	Storage       string
+	Volume        string
+	TargetVMID    int
+	TargetVolname string
+}
+
+var (
+	mockMu         sync.Mutex
+	renameRequests []RenameRequest
+	// vm101Unlinked tracks whether the CSI volume attached to VM 101 has been
+	// unlinked, so the config responder can answer the way PVE does afterwards:
+	// the drive key gone and the volume parked under unused0.
+	vm101Unlinked bool
+)
+
+// RenameRequests returns the proxmod renames the driver has asked for since the
+// last ResetRenameRequests. A rename leaves no trace in the RPC response it
+// happens under — publish and unpublish both treat it as best-effort — so this
+// recording is the only way a test can tell which vmid a volume was renamed to.
+func RenameRequests() []RenameRequest {
+	mockMu.Lock()
+	defer mockMu.Unlock()
+
+	return append([]RenameRequest(nil), renameRequests...)
+}
+
+// ResetRenameRequests clears the recorded renames.
+func ResetRenameRequests() {
+	mockMu.Lock()
+	defer mockMu.Unlock()
+
+	renameRequests = nil
+}
+
 // SetupMockResponders sets up the HTTP mock responders for Proxmox API calls.
 func SetupMockResponders() {
+	ResetRenameRequests()
+
+	mockMu.Lock()
+	vm101Unlinked = false
+	mockMu.Unlock()
+
 	httpmock.RegisterResponder(http.MethodGet, `=~/version$`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
@@ -298,6 +343,14 @@ func SetupMockResponders() {
 						Size:   1024 * 1024 * 1024,
 						Volid:  "local-lvm:vm-9999-pvc-unpublished",
 					},
+					{
+						// Attached to VM 101 and already renamed for it, so it appears
+						// here under 101 and not under the 9999 its volumeHandle carries.
+						Format: "raw",
+						Size:   uint64(csi.MinChunkSizeBytes),
+						Volid:  "local-lvm:vm-101-pvc-reassigned",
+						VMID:   101,
+					},
 				},
 			})
 		},
@@ -376,16 +429,30 @@ func SetupMockResponders() {
 	)
 	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/qemu/101/config`,
 		func(_ *http.Request) (*http.Response, error) {
-			return httpmock.NewJsonResponse(200, map[string]interface{}{
-				"data": map[string]interface{}{
-					"vmid":    101,
-					"scsi0":   "local-lvm:vm-101-disk-0,size=10G",
-					"scsi1":   "local-lvm:vm-101-disk-1,size=1G",
-					"scsi2":   "rbd:9999/vm-9999-volume-rbd.raw,backup=0,iothread=1",
-					"scsi3":   "local-lvm:vm-101-disk-2,size=1G",
-					"smbios1": "uuid=11833f4c-341f-4bd3-aad7-f7abed000001",
-				},
-			})
+			config := map[string]interface{}{
+				"vmid":  101,
+				"scsi0": "local-lvm:vm-101-disk-0,size=10G",
+				"scsi1": "local-lvm:vm-101-disk-1,size=1G",
+				"scsi2": "rbd:9999/vm-9999-volume-rbd.raw,backup=0,iothread=1",
+				"scsi3": "local-lvm:vm-101-disk-2,size=1G",
+				// A CSI volume that reassignVolumeOnAttach has already renamed onto
+				// this VM: its name carries 101, while the PV's volumeHandle still
+				// says 9999.
+				"scsi4":   "local-lvm:vm-101-pvc-reassigned,backup=0,iothread=1",
+				"smbios1": "uuid=11833f4c-341f-4bd3-aad7-f7abed000001",
+			}
+
+			mockMu.Lock()
+			unlinked := vm101Unlinked
+			mockMu.Unlock()
+
+			if unlinked {
+				// Unlinking a volume the VM owns does not remove it, it parks it.
+				delete(config, "scsi4")
+				config["unused0"] = "local-lvm:vm-101-pvc-reassigned"
+			}
+
+			return httpmock.NewJsonResponse(200, map[string]interface{}{"data": config})
 		},
 	)
 
@@ -440,8 +507,66 @@ func SetupMockResponders() {
 	httpmock.RegisterResponder(http.MethodGet, fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(taskErr.UPID)),
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": taskErr}))
 
+	// Detaching a disk from VM 101, for the reassign paths that have to unlink a
+	// volume before they can rename it back to the placeholder vmid.
+	taskPve2 := &proxmox.Task{
+		UPID:       "UPID:pve-2:003B4236:1DF4ABCB:667C1C46:qmconfig:101:root@pam:",
+		Type:       "qmconfig",
+		User:       "root",
+		Status:     "stopped",
+		ExitStatus: "OK",
+		Node:       "pve-2",
+		IsRunning:  false,
+	}
+
+	httpmock.RegisterResponder(http.MethodPut, `=~/nodes/pve-2/qemu/101/unlink`,
+		func(_ *http.Request) (*http.Response, error) {
+			mockMu.Lock()
+			vm101Unlinked = true
+			mockMu.Unlock()
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": taskPve2.UPID})
+		})
+	httpmock.RegisterResponder(http.MethodGet, fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-2", string(taskPve2.UPID)),
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": taskPve2}))
+
 	httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/pve-1/storage/local-lvm/content/vm-9999-pvc-123`,
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": task.UPID}).Times(1))
 	httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/pve-1/storage/local-lvm/content/vm-9999-pvc-error`,
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": taskErr.UPID}).Times(1))
+
+	// The proxmod rename endpoint: records the call and answers with the volid the
+	// real endpoint would return, so the driver's post-rename bookkeeping runs.
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/(\S+)/proxmod/csi-storage/rename`,
+		func(req *http.Request) (*http.Response, error) {
+			var params struct {
+				Storage       string `json:"storage"`
+				Volume        string `json:"volume"`
+				TargetVMID    int    `json:"target_vmid"`
+				TargetVolname string `json:"target_volname"`
+			}
+
+			if err := json.NewDecoder(req.Body).Decode(&params); err != nil {
+				return httpmock.NewJsonResponse(400, map[string]any{"data": nil})
+			}
+
+			node, err := httpmock.GetSubmatch(req, 1)
+			if err != nil {
+				return httpmock.NewJsonResponse(500, map[string]any{"data": nil})
+			}
+
+			mockMu.Lock()
+
+			renameRequests = append(renameRequests, RenameRequest{
+				Node:          node,
+				Storage:       params.Storage,
+				Volume:        params.Volume,
+				TargetVMID:    params.TargetVMID,
+				TargetVolname: params.TargetVolname,
+			})
+			mockMu.Unlock()
+
+			return httpmock.NewJsonResponse(200,
+				map[string]any{"data": fmt.Sprintf("%s:%s", params.Storage, params.TargetVolname)})
+		})
 }

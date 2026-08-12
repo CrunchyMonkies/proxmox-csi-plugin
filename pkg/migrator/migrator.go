@@ -145,6 +145,13 @@ type Migrator struct {
 	// on the Proxmox nodes. Default false preserves the built-in (root@pam)
 	// behavior.
 	TokenCopyEndpoint bool
+
+	// ProxmodEndpoint routes the volume copy through the proxmod extension from
+	// hack/proxmod-csi-storage (POST /nodes/{node}/proxmod/csi-storage/copy). Same
+	// purpose and same ACL model as TokenCopyEndpoint, different server-side
+	// implementation; requires the proxmox-csi-storage and proxmod packages on the
+	// Proxmox nodes. Takes precedence if both are set. Default false.
+	ProxmodEndpoint bool
 }
 
 // Request describes one volume migration.
@@ -425,7 +432,7 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 			if err = m.convertAndMove(ctx, cluster, vol, targetVol, req.TargetNode, taskTimeout); err != nil {
 				return fmt.Errorf("failed to migrate disk: %w", err)
 			}
-		} else if err = toolsproxmox.MoveQemuDisk(ctx, cluster, vol, req.TargetNode, targetVol, taskTimeout, m.useTokenCopy(vol.Region())); err != nil {
+		} else if err = toolsproxmox.MoveQemuDisk(ctx, cluster, vol, req.TargetNode, targetVol, taskTimeout, m.copyEndpoint(vol.Region())); err != nil {
 			// Best effort: remove the partial target file a failed move may
 			// have left behind so retries (and operators) start clean.
 			if onTarget, size, derr := toolsproxmox.DiskOnNode(ctx, cluster, targetVol, req.TargetNode); derr == nil && onTarget && size < expectedSize {
@@ -484,14 +491,22 @@ func (m *Migrator) Migrate(ctx context.Context, req Request) error {
 // VM ID, and Proxmox only ever frees volumes OWNED by a VM being destroyed —
 // so destroying the helper (cleanup, crash recovery, any failure path) can
 // only free the helper's own disposable conversion copy, never the original.
-// useTokenCopy resolves the effective token-copy-endpoint setting for a region: the
-// per-cluster config override if set, else the global default (TokenCopyEndpoint).
-func (m *Migrator) useTokenCopy(region string) bool {
+// copyEndpoint resolves which copy implementation to use for a region: the
+// per-cluster config override if set, else the global defaults (TokenCopyEndpoint /
+// ProxmodEndpoint). Proxmod wins if both resolve true.
+func (m *Migrator) copyEndpoint(region string) pxpool.CopyEndpoint {
 	if m.PClient == nil {
-		return m.TokenCopyEndpoint
+		switch {
+		case m.ProxmodEndpoint:
+			return pxpool.CopyEndpointProxmod
+		case m.TokenCopyEndpoint:
+			return pxpool.CopyEndpointCSICopy
+		default:
+			return pxpool.CopyEndpointBuiltin
+		}
 	}
 
-	return m.PClient.TokenCopyEndpoint(region, m.TokenCopyEndpoint)
+	return m.PClient.CopyEndpoint(region, m.TokenCopyEndpoint, m.ProxmodEndpoint)
 }
 
 func (m *Migrator) convertAndMove(ctx context.Context, cluster *goproxmox.APIClient, vol, targetVol *volume.Volume, targetNode string, taskTimeout int) error {
@@ -559,7 +574,7 @@ func (m *Migrator) convertAndMove(ctx context.Context, cluster *goproxmox.APICli
 
 	m.logf("moving converted disk %s to proxmox node %s (as %s)", rawVol.Disk(), targetNode, targetVol.VolID())
 
-	return toolsproxmox.MoveQemuDisk(ctx, cluster, rawVol, targetNode, targetVol, taskTimeout, m.useTokenCopy(vol.Region()))
+	return toolsproxmox.MoveQemuDisk(ctx, cluster, rawVol, targetNode, targetVol, taskTimeout, m.copyEndpoint(vol.Region()))
 }
 
 // reclaimSourceDisk deletes the source disk copy left at the migration origin once

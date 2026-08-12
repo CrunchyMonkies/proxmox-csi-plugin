@@ -49,6 +49,9 @@ type baseCSITestSuite struct {
 type configTestCase struct {
 	name   string
 	config string
+	// reassign mirrors features.reassignVolumeOnAttach in config, for the few tests
+	// whose expected result depends on it.
+	reassign bool
 }
 
 func getTestConfigs() []configTestCase {
@@ -60,6 +63,13 @@ func getTestConfigs() []configTestCase {
 		{
 			name:   "DefaultProvider",
 			config: "../../test/config/cluster-config-1.yaml",
+		},
+		{
+			// Same cluster as DefaultProvider with reassignVolumeOnAttach on, so the
+			// whole suite also runs against the suffix-resolution paths that flag turns on.
+			name:     "ReassignVolumeOnAttach",
+			config:   "../../test/config/cluster-config-3.yaml",
+			reassign: true,
 		},
 	}
 }
@@ -721,6 +731,9 @@ func (ts *configuredTestSuite) TestControllerUnpublishVolumeError() {
 		msg           string
 		request       *proto.ControllerUnpublishVolumeRequest
 		expectedError error
+		// expectedRename is the rename back to the placeholder vmid the detach must
+		// ask proxmod for, on the configs that have reassignVolumeOnAttach on.
+		expectedRename *testcluster.RenameRequest
 	}{
 		{
 			msg: "NodeID",
@@ -759,16 +772,41 @@ func (ts *configuredTestSuite) TestControllerUnpublishVolumeError() {
 				VolumeId: "cluster-1/pve-1/local-lvm/vm-9999-pvc-123",
 			},
 		},
+		{
+			// A volume reassignVolumeOnAttach renamed onto VM 101 on the way in.
+			// Detaching it must rename it back to the placeholder vmid the
+			// VolumeID carries, so the handle is valid again at rest.
+			msg: "UnpublishReassigned",
+			request: &proto.ControllerUnpublishVolumeRequest{
+				NodeId:   "cluster-1-node-2",
+				VolumeId: "cluster-1/pve-2/local-lvm/vm-9999-pvc-reassigned",
+			},
+			expectedRename: &testcluster.RenameRequest{
+				Node:          "pve-2",
+				Storage:       "local-lvm",
+				Volume:        "vm-101-pvc-reassigned",
+				TargetVMID:    9999,
+				TargetVolname: "vm-9999-pvc-reassigned",
+			},
+		},
 	}
 
 	for _, testCase := range tests {
 		ts.Run(fmt.Sprint(testCase.msg), func() {
+			testcluster.ResetRenameRequests()
+
 			_, err := ts.s.ControllerUnpublishVolume(context.Background(), testCase.request)
 			if testCase.expectedError == nil {
 				ts.Require().NoError(err)
 			} else {
 				ts.Require().Error(err)
 				ts.Require().Equal(testCase.expectedError.Error(), err.Error())
+			}
+
+			if testCase.expectedRename != nil && ts.configCase.reassign {
+				ts.Require().Equal([]testcluster.RenameRequest{*testCase.expectedRename}, testcluster.RenameRequests())
+			} else {
+				ts.Require().Empty(testcluster.RenameRequests())
 			}
 		})
 	}
@@ -1014,10 +1052,14 @@ func (ts *configuredTestSuite) TestControllerExpandVolumeError() {
 	}
 
 	tests := []struct {
-		msg           string
-		request       *proto.ControllerExpandVolumeRequest
-		expected      *proto.ControllerExpandVolumeResponse
-		expectedError error
+		msg      string
+		request  *proto.ControllerExpandVolumeRequest
+		expected *proto.ControllerExpandVolumeResponse
+		// expectedError applies to every config; expectedErrorNoReassign overrides it
+		// for the configs that have reassignVolumeOnAttach off, for cases whose volume
+		// only exists under a renamed name and so is unreachable without the feature.
+		expectedError           error
+		expectedErrorNoReassign error
 	}{
 		{
 			msg: "VolumeID",
@@ -1088,6 +1130,24 @@ func (ts *configuredTestSuite) TestControllerExpandVolumeError() {
 			},
 		},
 		{
+			// A volume reassignVolumeOnAttach has already renamed onto the VM holding
+			// it: Proxmox stores it as vm-101-pvc-reassigned while the PV's immutable
+			// volumeHandle still says 9999. Expanding it exercises both halves of the
+			// stale-handle path — resolveVolume finding it under the other name, and
+			// getVMByAttachedVolume not mistaking VM 101 for the placeholder owner it
+			// is told to skip. Without the feature the volume is simply not there.
+			msg: "ExpandVolumeReassigned",
+			request: &proto.ControllerExpandVolumeRequest{
+				VolumeId:      "cluster-1/pve-2/local-lvm/vm-9999-pvc-reassigned",
+				CapacityRange: capRange,
+			},
+			expected: &proto.ControllerExpandVolumeResponse{
+				CapacityBytes:         100 * csi.GiB,
+				NodeExpansionRequired: true,
+			},
+			expectedErrorNoReassign: status.Error(codes.NotFound, "volume cluster-1/pve-2/local-lvm/vm-9999-pvc-reassigned not found"),
+		},
+		{
 			// The volume ID has no zone (cluster//<storage>/<disk>), so vol.Node() starts
 			// empty and checkVolume must iterate all nodes to find the disk. vm-9999-volume-rbd.raw
 			// only exists in pve-2's storage content.
@@ -1105,6 +1165,10 @@ func (ts *configuredTestSuite) TestControllerExpandVolumeError() {
 
 	for _, testCase := range tests {
 		ts.Run(fmt.Sprint(testCase.msg), func() {
+			if testCase.expectedErrorNoReassign != nil && !ts.configCase.reassign {
+				testCase.expectedError = testCase.expectedErrorNoReassign
+			}
+
 			resp, err := ts.s.ControllerExpandVolume(context.Background(), testCase.request)
 			if testCase.expectedError == nil {
 				ts.Require().NoError(err)

@@ -1,0 +1,9 @@
+# dpkg-buildpackage build residue. The .deb/.changes/.buildinfo themselves are
+# written to the parent directory (hack/) and are ignored from the repo root.
+/debian/proxmox-csi-storage/
+/debian/.debhelper/
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper.log
+/debian/*.debhelper
+/debian/debhelper-build-stamp

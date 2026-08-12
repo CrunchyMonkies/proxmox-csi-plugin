@@ -1,0 +1,7 @@
+#!/usr/bin/make -f
+
+# dh's makefile buildsystem calls `make build` and `make install DESTDIR=...`,
+# which is the entire build. Nothing here needs overriding.
+
+%:
+	dh $@

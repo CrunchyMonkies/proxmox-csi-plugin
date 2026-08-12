@@ -142,3 +142,82 @@ func TestTokenCopyEndpoint(t *testing.T) {
 	assert.True(t, pool.TokenCopyEndpoint("does-not-exist", true))
 	assert.False(t, pool.TokenCopyEndpoint("does-not-exist", false))
 }
+
+func TestProxmodEndpoint(t *testing.T) {
+	truePtr, falsePtr := true, false
+
+	cfg := []*pxpool.ProxmoxCluster{
+		{URL: "https://127.0.0.1:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "unset"},
+		{URL: "https://127.0.0.2:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "on", ProxmodEndpoint: &truePtr},
+		{URL: "https://127.0.0.3:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "off", ProxmodEndpoint: &falsePtr},
+	}
+
+	pool, err := pxpool.NewProxmoxPool(cfg)
+	assert.Nil(t, err)
+
+	// Unset cluster follows the fallback (the global --proxmod-endpoint flag).
+	assert.False(t, pool.ProxmodEndpoint("unset", false))
+	assert.True(t, pool.ProxmodEndpoint("unset", true))
+
+	// Per-cluster override wins over the fallback in both directions.
+	assert.True(t, pool.ProxmodEndpoint("on", false))
+	assert.False(t, pool.ProxmodEndpoint("off", true))
+
+	// Unknown region falls back.
+	assert.True(t, pool.ProxmodEndpoint("does-not-exist", true))
+	assert.False(t, pool.ProxmodEndpoint("does-not-exist", false))
+}
+
+func TestCopyEndpoint(t *testing.T) {
+	truePtr, falsePtr := true, false
+
+	cfg := []*pxpool.ProxmoxCluster{
+		{URL: "https://127.0.0.1:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "unset"},
+		{URL: "https://127.0.0.2:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "token", TokenCopyEndpoint: &truePtr},
+		{URL: "https://127.0.0.3:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "proxmod", ProxmodEndpoint: &truePtr},
+		{URL: "https://127.0.0.4:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "both", TokenCopyEndpoint: &truePtr, ProxmodEndpoint: &truePtr},
+		{URL: "https://127.0.0.5:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "proxmod-off", ProxmodEndpoint: &falsePtr},
+	}
+
+	pool, err := pxpool.NewProxmoxPool(cfg)
+	assert.Nil(t, err)
+
+	tests := []struct {
+		msg               string
+		region            string
+		tokenCopyFallback bool
+		proxmodFallback   bool
+		expected          pxpool.CopyEndpoint
+	}{
+		{"no override, no fallback: built-in root@pam copy", "unset", false, false, pxpool.CopyEndpointBuiltin},
+		{"no override, token-copy fallback", "unset", true, false, pxpool.CopyEndpointCSICopy},
+		{"no override, proxmod fallback", "unset", false, true, pxpool.CopyEndpointProxmod},
+		{"no override, both fallbacks: proxmod wins", "unset", true, true, pxpool.CopyEndpointProxmod},
+
+		{"token-copy override beats absent fallbacks", "token", false, false, pxpool.CopyEndpointCSICopy},
+		{"proxmod override beats absent fallbacks", "proxmod", false, false, pxpool.CopyEndpointProxmod},
+		{"proxmod override beats token-copy fallback", "proxmod", true, false, pxpool.CopyEndpointProxmod},
+		{"token-copy override loses to proxmod fallback", "token", false, true, pxpool.CopyEndpointProxmod},
+
+		{"both overrides true: proxmod wins", "both", false, false, pxpool.CopyEndpointProxmod},
+		{"both overrides true, both fallbacks: proxmod wins", "both", true, true, pxpool.CopyEndpointProxmod},
+
+		{"proxmod explicitly off falls through to token-copy fallback", "proxmod-off", true, true, pxpool.CopyEndpointCSICopy},
+		{"proxmod explicitly off, no token-copy: built-in", "proxmod-off", false, true, pxpool.CopyEndpointBuiltin},
+
+		{"unknown region follows fallbacks", "does-not-exist", true, false, pxpool.CopyEndpointCSICopy},
+	}
+
+	for _, test := range tests {
+		t.Run(test.msg, func(t *testing.T) {
+			assert.Equal(t, test.expected, pool.CopyEndpoint(test.region, test.tokenCopyFallback, test.proxmodFallback))
+		})
+	}
+}
+
+func TestCopyEndpointString(t *testing.T) {
+	assert.Equal(t, "builtin", pxpool.CopyEndpointBuiltin.String())
+	assert.Equal(t, "token-copy-endpoint", pxpool.CopyEndpointCSICopy.String())
+	assert.Equal(t, "proxmod-endpoint", pxpool.CopyEndpointProxmod.String())
+	assert.Equal(t, "unknown", pxpool.CopyEndpoint(42).String())
+}

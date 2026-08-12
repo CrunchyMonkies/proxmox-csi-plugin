@@ -242,6 +242,35 @@ clusters:
 				},
 			},
 		},
+		{
+			msg: "reassign volume on attach enabled",
+			config: strings.NewReader(`
+features:
+  reassignVolumeOnAttach: true
+clusters:
+  - url: https://example.com
+    insecure: false
+    token_id: "ha"
+    token_secret: "secret"
+    region: cluster-1
+`),
+			expected: &providerconfig.ClustersConfig{
+				Features: providerconfig.ClustersFeatures{
+					Provider:               providerconfig.ProviderDefault,
+					ControllerVMID:         providerconfig.DefaultControllerVMID,
+					ReassignVolumeOnAttach: true,
+				},
+				Clusters: []*pxpool.ProxmoxCluster{
+					{
+						URL:         "https://example.com",
+						Insecure:    false,
+						TokenID:     "ha",
+						TokenSecret: "secret",
+						Region:      "cluster-1",
+					},
+				},
+			},
+		},
 	}
 
 	for _, testCase := range tests {
