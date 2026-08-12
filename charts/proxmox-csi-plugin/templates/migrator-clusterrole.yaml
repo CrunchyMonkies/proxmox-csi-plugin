@@ -39,4 +39,8 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Resolve token_ref cluster credentials from a Secret
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 {{- end }}

@@ -71,7 +71,7 @@ func main() {
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 
-	kconfig, _, err := tools.BuildConfig(*kubeconfig, "")
+	kconfig, namespace, err := tools.BuildConfig(*kubeconfig, "")
 	if err != nil {
 		klog.Error(err, "Failed to build a Kubernetes config")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
@@ -127,7 +127,7 @@ func main() {
 
 	identityService := csi.NewIdentityService()
 
-	controllerService, err := csi.NewControllerService(clientset, *cloudconfig)
+	controllerService, err := csi.NewControllerService(clientset, *cloudconfig, namespace)
 	if err != nil {
 		klog.ErrorS(err, "Failed to create controller service")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)

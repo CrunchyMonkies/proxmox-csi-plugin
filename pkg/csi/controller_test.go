@@ -149,7 +149,7 @@ func (ts *baseCSITestSuite) setupTestSuite(config string) error {
 
 	kclient := fake.NewClientset(nodes, pv)
 
-	px, err := csi.NewControllerService(kclient, config)
+	px, err := csi.NewControllerService(kclient, config, "default")
 	if err != nil {
 		return fmt.Errorf("failed to create controller service: %v", err)
 	}
@@ -192,12 +192,12 @@ func (ts *configuredTestSuite) SetupTest() {
 }
 
 func TestNewControllerService(t *testing.T) {
-	service, err := csi.NewControllerService(&clientkubernetes.Clientset{}, "fake-file")
+	service, err := csi.NewControllerService(&clientkubernetes.Clientset{}, "fake-file", "default")
 	assert.NotNil(t, err)
 	assert.Nil(t, service)
 	assert.Equal(t, "failed to read config: error reading fake-file: open fake-file: no such file or directory", err.Error())
 
-	service, err = csi.NewControllerService(&clientkubernetes.Clientset{}, "../../hack/testdata/cloud-config.yaml")
+	service, err = csi.NewControllerService(&clientkubernetes.Clientset{}, "../../hack/testdata/cloud-config.yaml", "default")
 	assert.Nil(t, err)
 	assert.NotNil(t, service)
 }
