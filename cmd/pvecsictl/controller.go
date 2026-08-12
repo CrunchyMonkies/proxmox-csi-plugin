@@ -100,6 +100,7 @@ func (c *controllerCmd) runController(cmd *cobra.Command, _ []string) error {
 	reactiveEvacuation, _ := flags.GetBool("reactive-evacuation")      //nolint: errcheck
 	reactiveGrace, _ := flags.GetDuration("reactive-evacuation-grace") //nolint: errcheck
 	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint)       //nolint: errcheck
+	proxmodEndpoint, _ := flags.GetBool(flagProxmodEndpoint)           //nolint: errcheck
 	maxAttempts, _ := flags.GetInt("max-attempts")                     //nolint: errcheck
 	helperVMID, _ := flags.GetInt("helper-vmid")                       //nolint: errcheck
 	taskTimeout, _ := flags.GetInt("timeout")                          //nolint: errcheck
@@ -134,6 +135,7 @@ func (c *controllerCmd) runController(cmd *cobra.Command, _ []string) error {
 		Logger:            logger,
 		HelperVMID:        helperVMID,
 		TokenCopyEndpoint: tokenCopyEndpoint,
+		ProxmodEndpoint:   proxmodEndpoint,
 	}
 
 	controller := migrationcontroller.New(c.kclient, m, recorder, migrationcontroller.Options{
@@ -217,7 +219,9 @@ func (c *controllerCmd) controllerValidate(cmd *cobra.Command, _ []string) error
 	c.primaryStorage = map[string]map[string]string{}
 
 	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
-	if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint); err != nil {
+	proxmodEndpoint, _ := flags.GetBool(flagProxmodEndpoint)     //nolint: errcheck
+
+	if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint, proxmodEndpoint); err != nil {
 		return err
 	}
 

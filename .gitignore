@@ -30,6 +30,12 @@ go.work
 /hack/kubeconfig
 /hack/kubeconfig*
 /hack/*.yaml
+
+# dpkg-buildpackage writes artifacts to the PARENT of the source dir, so
+# building hack/<pkg>/ drops these in hack/.
+/hack/*.deb
+/hack/*.changes
+/hack/*.buildinfo
 kubeconfig
 clusters.yaml
 .cache/

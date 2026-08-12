@@ -10,6 +10,9 @@ features:
   # Default is 9999, which is a safe value that is unlikely to conflict with existing VMs.
   # You can change it if needed, but make sure to choose a value that is not used by any existing VM in your Proxmox cluster.
   controllerVMID: 9999
+  # Reassign a volume's Proxmox ownership (vmid) to the real VM on attach.
+  # Default is false. See docs/reassign-volume-on-attach.md before enabling.
+  reassignVolumeOnAttach: false
 
 clusters:
   # List of Proxmox clusters
@@ -43,7 +46,11 @@ You can define multiple clusters in the `clusters` section.
 * `token_secret` - The name of the Kubernetes Secret that contains the Proxmox API token.
 * `token_secret_file` - The path to a file containing the Proxmox API token secret. This is an alternative to `token_secret`.
 * `region` - The name of the region, which is also used as `topology.kubernetes.io/region` label.
+* `token_copy_endpoint` - Per-cluster override for the server-side volume copy used by volume migration **and by volume snapshots**, routing it through the `pve-csi-copy` package's endpoint so a scoped token replaces `root@pam`. See [`docs/migration-controller.md`](migration-controller.md) and [`docs/volumesnapshot.md`](volumesnapshot.md).
+* `proxmod_endpoint` - Per-cluster override for the same copy, routing it through the `proxmox-csi-storage` proxmod extension instead. Same purpose and same ACL requirements as `token_copy_endpoint`, different server-side implementation; wins if both are true. See [`docs/migration-controller.md`](migration-controller.md) and [`docs/volumesnapshot.md`](volumesnapshot.md).
 
 ## Feature flags
 
 * `provider` - Set the provider type. The default is `default`, which uses provider-id to define the Proxmox VM ID. The `capmox` value is used for working with the Cluster API for Proxmox (CAPMox).
+* `controllerVMID` - The placeholder VM ID the controller uses to own CSI volumes before they're attached. Default is `9999`.
+* `reassignVolumeOnAttach` - Reassign a volume's Proxmox ownership to the real target VM on attach. Default is `false`. See [`docs/reassign-volume-on-attach.md`](reassign-volume-on-attach.md) — carries a VolumeID-stability risk on LVM/ZFS/directory storage.

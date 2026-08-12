@@ -1,5 +1,14 @@
 # Token copy-volume endpoint (root@pam-free migration)
 
+> **Superseded by [`../proxmod-csi-storage/`](../proxmod-csi-storage/).** That
+> package serves the same token-authorized copy through
+> [proxmod](https://github.com/CrunchyMonkies/proxmod)'s supported extension
+> mechanism, so it needs no `ExecStart` rewriting of its own and its endpoint
+> cannot collide with a PVE-owned route. Prefer it for new deployments
+> (`--proxmod-endpoint`). This package remains supported and unmodified — nothing
+> here needs to change for existing fleets, and `--token-copy-endpoint` keeps
+> working exactly as before.
+
 Lets the migration controller move VM-disk volumes between storages **with an API
 token** instead of `root@pam`, by adding a permission-checked copy endpoint to PVE
 — **without patching any Proxmox file**.
@@ -91,8 +100,13 @@ the main review finding):
   credential is stored anywhere** — the token authorises, `pvedaemon` provides root.
 - **Input validation.** `parse_volume_id` only validates the *storage-id* prefix (the
   volname part is `.+`), so it is **not** relied on to reject traversal. The `volume`
-  parameter is constrained by an explicit pattern (`^[A-Za-z0-9][A-Za-z0-9._-]*$`),
-  rejecting `:`, `/` and `..` before it is ever concatenated into a volid.
+  parameter and the target volname are both constrained by an explicit pattern
+  (`^(?:[1-9][0-9]{2,8}/)?[A-Za-z0-9][A-Za-z0-9._-]*$`, maxLength 160), applied before
+  either is concatenated into a volid. The optional leading component is a PVE VMID
+  (100–999999999) and nothing else, so the directory plugin's
+  `9999/vm-9999-disk-0.raw` shape passes while `:`, `..`, absolute paths, and deeper
+  nesting are rejected. The two spellings of the pattern (schema and target check) are
+  asserted identical by `t/volname.t`.
 - **No clobber** (advisory): refuses if the target volume already exists. This is
   best-effort against a TOCTOU race; the hard guarantee is the target plugin's
   exclusive `alloc` during `storage_migrate`.
@@ -137,8 +151,13 @@ running guests and existing CSI mounts are unaffected), and it must be present o
 With this installed, the migrator (`pvecsictl` / the migration controller) no longer
 needs `root@pam`. Pass **`--token-copy-endpoint`** (or set `token_copy_endpoint: true`
 per cluster in the cloud-config) and point the cloud config at a **token** — omit
-`username`/`password`, since the client prefers them when both are present. On the CSI
-storages the token needs:
+`username`/`password`, since the client prefers them when both are present. The same
+per-cluster setting also routes the CSI controller's **volume snapshots** here, which
+removes the last reason that path needed root; see
+[`docs/volumesnapshot.md`](../../docs/volumesnapshot.md). Snapshots on **directory
+storage require >= 0.4.0** — earlier versions rejected the `9999/vm-9999-….raw` volname
+shape, and there is deliberately no client-side fallback to the built-in endpoint. On
+the CSI storages the token needs:
 - `Datastore.Audit` (+ access to the source volumes — for CSI-owned volumes the
   `kubernetes-csi@pve` identity already owns them) on the **source**, and
 - `Datastore.AllocateSpace` on the **target**.

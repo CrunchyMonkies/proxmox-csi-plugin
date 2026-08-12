@@ -31,25 +31,31 @@ import (
 )
 
 // requireMigrationCredentials verifies each cluster carries credentials capable of
-// copying volumes. Without the token-authorized copy endpoint the copy runs through
+// copying volumes. Without a token-authorized copy endpoint the copy runs through
 // PVE's built-in root@pam-only "copy" method, so username/password (a root account)
-// is required. With --token-copy-endpoint the copy is authorized by the token's ACL,
-// so an API token (or username/password) is accepted.
-func requireMigrationCredentials(clusters []*pxpool.ProxmoxCluster, tokenEndpoint bool) error {
+// is required. With --token-copy-endpoint or --proxmod-endpoint the copy is authorized
+// by the token's ACL — the two endpoints have identical credential requirements — so
+// an API token (or username/password) is accepted.
+func requireMigrationCredentials(clusters []*pxpool.ProxmoxCluster, tokenEndpoint, proxmodEndpoint bool) error {
 	for _, cl := range clusters {
 		hasUserPass := cl.Username != "" && cl.Password != ""
 
-		if !tokenEndpoint {
+		if !tokenEndpoint && !proxmodEndpoint {
 			if !hasUserPass {
-				return fmt.Errorf("cluster %s: requires a Proxmox root account (username/password), or install the token copy endpoint and pass --%s", cl.Region, flagTokenCopyEndpoint)
+				return fmt.Errorf("cluster %s: requires a Proxmox root account (username/password), or install a token copy endpoint and pass --%s or --%s", cl.Region, flagProxmodEndpoint, flagTokenCopyEndpoint)
 			}
 
 			continue
 		}
 
+		flag := flagTokenCopyEndpoint
+		if proxmodEndpoint {
+			flag = flagProxmodEndpoint
+		}
+
 		hasToken := (cl.TokenID != "" || cl.TokenIDFile != "") && (cl.TokenSecret != "" || cl.TokenSecretFile != "")
 		if !hasToken && !hasUserPass {
-			return fmt.Errorf("--%s requires an API token (token_id/token_secret) or username/password in the config file (cluster=%s)", flagTokenCopyEndpoint, cl.Region)
+			return fmt.Errorf("--%s requires an API token (token_id/token_secret) or username/password in the config file (cluster=%s)", flag, cl.Region)
 		}
 	}
 
@@ -70,6 +76,7 @@ var (
 	flagKubeConfig    = "kubeconfig"
 
 	flagTokenCopyEndpoint = "token-copy-endpoint"
+	flagProxmodEndpoint   = "proxmod-endpoint"
 
 	logger *log.Entry
 )
@@ -114,6 +121,11 @@ func run() int {
 
 	cmd.PersistentFlags().Bool(flagTokenCopyEndpoint, false,
 		"use the token-authorized copy endpoint (hack/pve-token-copy) instead of the root@pam-only built-in copy; needs the pve-csi-copy package on nodes; per-cluster override: token_copy_endpoint")
+
+	cmd.PersistentFlags().Bool(flagProxmodEndpoint, false,
+		"use the proxmod extension's copy endpoint (hack/proxmod-csi-storage) instead of the root@pam-only "+
+			"built-in copy; needs the proxmod and proxmox-csi-storage packages on nodes; wins over --"+
+			flagTokenCopyEndpoint+"; per-cluster override: proxmod_endpoint")
 
 	cmd.AddCommand(buildMigrateCmd())
 	cmd.AddCommand(buildRenameCmd())

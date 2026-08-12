@@ -75,6 +75,7 @@ func (c *migrateCmd) runMigration(cmd *cobra.Command, args []string) error {
 	targetStorage, _ := flags.GetString("storage")               //nolint: errcheck
 	helperVMID, _ := flags.GetInt("helper-vmid")                 //nolint: errcheck
 	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
+	proxmodEndpoint, _ := flags.GetBool(flagProxmodEndpoint)     //nolint: errcheck
 
 	m := &migrator.Migrator{
 		KClient:           c.kclient,
@@ -82,6 +83,7 @@ func (c *migrateCmd) runMigration(cmd *cobra.Command, args []string) error {
 		Logger:            logger,
 		HelperVMID:        helperVMID,
 		TokenCopyEndpoint: tokenCopyEndpoint,
+		ProxmodEndpoint:   proxmodEndpoint,
 	}
 
 	err := m.Migrate(context.Background(), migrator.Request{
@@ -111,7 +113,9 @@ func (c *migrateCmd) migrationValidate(cmd *cobra.Command, _ []string) error {
 	}
 
 	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
-	if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint); err != nil {
+	proxmodEndpoint, _ := flags.GetBool(flagProxmodEndpoint)     //nolint: errcheck
+
+	if err := requireMigrationCredentials(cfg.Clusters, tokenCopyEndpoint, proxmodEndpoint); err != nil {
 		return err
 	}
 

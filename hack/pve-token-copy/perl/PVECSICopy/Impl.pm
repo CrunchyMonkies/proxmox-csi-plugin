@@ -96,14 +96,22 @@ sub register {
                 node => PVE::JSONSchema::get_standard_option('pve-node'),
                 storage => PVE::JSONSchema::get_standard_option('pve-storage-id'),
                 volume => {
-                    description => "Source volume name within {storage} (block volname). "
+                    description => "Source volume name within {storage}. Either a flat "
+                        . "block volname or the directory plugin's '<vmid>/<name>' form. "
                         . "Body parameter (the URI carries no volume component).",
                     type => 'string',
                     # Explicit allow-list. parse_volume_id only validates the storage-id
                     # prefix (volname is `.+`), so DO NOT rely on it to reject traversal.
-                    # This rejects ':' (volid-splitting), '/' and '..' (traversal).
-                    pattern => '^[A-Za-z0-9][A-Za-z0-9._\-]*$',
-                    maxLength => 128,
+                    # This rejects ':' (volid-splitting) and '..' (traversal).
+                    #
+                    # The optional leading '<vmid>/' is the directory plugin's volname
+                    # shape ('9999/vm-9999-disk-0.raw'), which file-backed storages
+                    # produce for every volume. '[1-9][0-9]{2,8}' is PVE's VMID range
+                    # (100-999999999) and nothing else, so no second path component,
+                    # no '..' (the name must start with [A-Za-z0-9]), and no absolute
+                    # path can get through.
+                    pattern => '^(?:[1-9][0-9]{2,8}/)?[A-Za-z0-9][A-Za-z0-9._\-]*$',
+                    maxLength => 160,
                 },
                 target => {
                     description => "Target volume id, 'storage:volname'.",
@@ -144,11 +152,15 @@ sub register {
             my ($dst_sid, $dst_volname) = PVE::Storage::parse_volume_id($param->{target});
             # Same allow-list as the source volume above. parse_volume_id only
             # validates the storage-id prefix (volname is `.+`), so guard the
-            # target volname against ':' (volid-splitting), '/' and '..'
-            # (traversal on directory-backed storage) here rather than relying on
-            # the destination plugin's parse_volname to reject them on import.
+            # target volname against ':' (volid-splitting) and '..' (traversal on
+            # directory-backed storage) here rather than relying on the
+            # destination plugin's parse_volname to reject them on import. The
+            # single optional '<vmid>/' component is the directory plugin's own
+            # volname shape and is passed through to storage_migrate as
+            # target_volname.
             die "invalid target volume name\n"
-                unless $dst_volname =~ /^[A-Za-z0-9][A-Za-z0-9._\-]*$/ && length($dst_volname) <= 128;
+                unless $dst_volname =~ m{^(?:[1-9][0-9]{2,8}/)?[A-Za-z0-9][A-Za-z0-9._\-]*$}
+                && length($dst_volname) <= 160;
             my $dst_volid = "$dst_sid:$dst_volname";
             $rpcenv->check($authuser, "/storage/$dst_sid", ['Datastore.AllocateSpace']);
 

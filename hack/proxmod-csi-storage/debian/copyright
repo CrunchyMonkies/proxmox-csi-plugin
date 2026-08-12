@@ -1,0 +1,20 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: proxmox-csi-storage
+Source: https://github.com/CrunchyMonkies/proxmox-csi-plugin
+Comment: This package is AGPL-3.0-or-later while the rest of this repository
+ is Apache-2.0. The module is a proxmod extension: it subclasses
+ PVE::RESTHandler and is loaded into pvedaemon, both AGPL, and registers
+ through proxmod's own AGPL extension API. It is licensed to match what it
+ links against rather than the repository default. Nothing else in this
+ repository links against it -- the Go client only speaks to it over HTTP.
+
+Files: *
+Copyright: The proxmox-csi-plugin authors
+License: AGPL-3.0-or-later
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU Affero General Public License as published by the Free
+ Software Foundation, either version 3 of the License, or (at your option) any
+ later version.
+ .
+ On Debian systems the full text of the GNU Affero General Public License
+ version 3 can be found in /usr/share/common-licenses/AGPL-3.

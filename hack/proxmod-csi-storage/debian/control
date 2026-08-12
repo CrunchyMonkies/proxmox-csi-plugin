@@ -1,0 +1,26 @@
+Source: proxmox-csi-storage
+Section: admin
+Priority: optional
+Maintainer: CrunchyMonkies <opensource@crunchymonkies.invalid>
+Build-Depends:
+ debhelper-compat (= 13),
+ perl,
+Standards-Version: 4.7.0
+Homepage: https://github.com/CrunchyMonkies/proxmox-csi-plugin
+Rules-Requires-Root: no
+
+Package: proxmox-csi-storage
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${perl:Depends},
+ proxmod (>= 0.1.0),
+Description: token-authorised storage ops for proxmox-csi-plugin
+ A proxmod extension providing a cross-storage volume copy REST endpoint
+ under /nodes/{node}/proxmod/csi-storage, used by proxmox-csi-plugin's
+ migration controller and volume snapshots. It is gated by an explicit ACL
+ check instead of PVE's root@pam-only default, so proxmox-csi-plugin can
+ use a scoped API token instead of root credentials.
+ .
+ Supersedes the hack/pve-token-copy systemd-wrapper workaround shipped
+ directly in proxmox-csi-plugin, which predates proxmod.

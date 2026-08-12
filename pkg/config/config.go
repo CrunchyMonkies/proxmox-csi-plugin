@@ -28,6 +28,8 @@ import (
 	yaml "gopkg.in/yaml.v3"
 
 	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
+
+	"k8s.io/klog/v2"
 )
 
 // Provider specifies the provider. Can be 'default' or 'capmox'
@@ -57,6 +59,11 @@ type ClustersFeatures struct {
 	// ControllerVMID is the VM ID used by the controller for volume operations (e.g. volume naming).
 	// Default is 9999.
 	ControllerVMID int `yaml:"controllerVmID,omitempty"`
+	// ReassignVolumeOnAttach enables reassigning a CSI volume's Proxmox ownership (vmid)
+	// from ControllerVMID to the real target VM at attach time. Off by default: see
+	// docs/reassign-volume-on-attach.md for the VolumeID-stability risk this carries on
+	// storages that rename volumes on ownership reassignment (LVM/ZFS/dir).
+	ReassignVolumeOnAttach bool `yaml:"reassignVolumeOnAttach,omitempty"`
 }
 
 // ClustersConfig is proxmox multi-cluster cloud config.
@@ -128,7 +135,34 @@ func ReadCloudConfig(config io.Reader) (ClustersConfig, error) {
 		return ClustersConfig{}, fmt.Errorf("invalid VM ID, must be greater than %d", MinControllerVMID)
 	}
 
+	// A warning rather than an error: the feature degrades to a no-op without the
+	// endpoint (the rename fails, the attach proceeds under the volume's existing
+	// name), so refusing to start would be a harsher response than the misconfig
+	// warrants. But it is silent otherwise, and a flag that is set and does nothing
+	// is worth saying out loud once at startup.
+	if cfg.Features.ReassignVolumeOnAttach && !hasProxmodEndpoint(cfg.Clusters) {
+		klog.Warning("features.reassignVolumeOnAttach is enabled but no cluster sets proxmod_endpoint: true; " +
+			"volumes will stay owned by the controller vmid. See docs/reassign-volume-on-attach.md")
+	}
+
 	return cfg, nil
+}
+
+// hasProxmodEndpoint reports whether any cluster opts into the proxmod extension,
+// which is where the rename endpoint reassignVolumeOnAttach depends on lives.
+//
+// The per-cluster field is read directly rather than through
+// ProxmoxPool.ProxmodEndpoint, which needs a built pool this early check does not
+// have; the two agree, since a nil override there resolves to the same fallback
+// this treats as "not set".
+func hasProxmodEndpoint(clusters []*pxpool.ProxmoxCluster) bool {
+	for _, c := range clusters {
+		if c.ProxmodEndpoint != nil && *c.ProxmodEndpoint {
+			return true
+		}
+	}
+
+	return false
 }
 
 // ReadCloudConfigFromFile reads cloud config from a file.

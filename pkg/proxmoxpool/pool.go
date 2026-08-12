@@ -54,6 +54,15 @@ type ProxmoxCluster struct {
 	// routes each cluster correctly.
 	TokenCopyEndpoint *bool `yaml:"token_copy_endpoint,omitempty"`
 
+	// ProxmodEndpoint selects, per cluster, whether volume migration copies via the
+	// proxmod extension from hack/proxmod-csi-storage, which serves the same
+	// token-authorized copy at /nodes/{node}/proxmod/csi-storage/copy. Same purpose as
+	// TokenCopyEndpoint, different server-side implementation — see
+	// docs/migration-controller.md. When nil, the migrator's global default (the
+	// --proxmod-endpoint CLI flag) applies. If this and TokenCopyEndpoint both
+	// resolve true, proxmod wins.
+	ProxmodEndpoint *bool `yaml:"proxmod_endpoint,omitempty"`
+
 	// PrimaryStorage maps a Proxmox node name to its preferred storage ID.
 	// Used by volume migration when the source storage name does not exist
 	// on the target node.
@@ -65,6 +74,8 @@ type ProxmoxPool struct {
 	clients map[string]*goproxmox.APIClient
 	// tokenCopyEndpoint holds the per-region TokenCopyEndpoint override (nil = unset).
 	tokenCopyEndpoint map[string]*bool
+	// proxmodEndpoint holds the per-region ProxmodEndpoint override (nil = unset).
+	proxmodEndpoint map[string]*bool
 }
 
 // NewProxmoxPool creates a new Proxmox cluster client.
@@ -73,6 +84,7 @@ func NewProxmoxPool(config []*ProxmoxCluster, options ...proxmox.Option) (*Proxm
 	if clusters > 0 {
 		clients := make(map[string]*goproxmox.APIClient, clusters)
 		tokenCopyEndpoint := make(map[string]*bool, clusters)
+		proxmodEndpoint := make(map[string]*bool, clusters)
 
 		for _, cfg := range config {
 			opts := []proxmox.Option{proxmox.WithUserAgent("ProxmoxCSIPlugin/1.0")}
@@ -123,11 +135,13 @@ func NewProxmoxPool(config []*ProxmoxCluster, options ...proxmox.Option) (*Proxm
 
 			clients[cfg.Region] = pxClient
 			tokenCopyEndpoint[cfg.Region] = cfg.TokenCopyEndpoint
+			proxmodEndpoint[cfg.Region] = cfg.ProxmodEndpoint
 		}
 
 		return &ProxmoxPool{
 			clients:           clients,
 			tokenCopyEndpoint: tokenCopyEndpoint,
+			proxmodEndpoint:   proxmodEndpoint,
 		}, nil
 	}
 
@@ -143,6 +157,61 @@ func (c *ProxmoxPool) TokenCopyEndpoint(region string, fallback bool) bool {
 	}
 
 	return fallback
+}
+
+// ProxmodEndpoint reports whether volume migration on the given region should use the
+// proxmod extension's copy endpoint. Resolved exactly like TokenCopyEndpoint.
+func (c *ProxmoxPool) ProxmodEndpoint(region string, fallback bool) bool {
+	if v, ok := c.proxmodEndpoint[region]; ok && v != nil {
+		return *v
+	}
+
+	return fallback
+}
+
+// CopyEndpoint identifies which server-side implementation of the cross-storage
+// volume copy a region should be driven through.
+type CopyEndpoint int
+
+const (
+	// CopyEndpointBuiltin is Proxmox's own content copy method. It has no permissions
+	// block, so it requires a root@pam credential.
+	CopyEndpointBuiltin CopyEndpoint = iota
+	// CopyEndpointCSICopy is the pve-csi-copy systemd-wrapper hack in
+	// hack/pve-token-copy. Accepts a scoped API token.
+	CopyEndpointCSICopy
+	// CopyEndpointProxmod is the proxmod extension in hack/proxmod-csi-storage.
+	// Accepts a scoped API token. Preferred over CopyEndpointCSICopy.
+	CopyEndpointProxmod
+)
+
+// String renders the endpoint as the user-facing flag name that selects it.
+func (e CopyEndpoint) String() string {
+	switch e {
+	case CopyEndpointCSICopy:
+		return "token-copy-endpoint"
+	case CopyEndpointProxmod:
+		return "proxmod-endpoint"
+	case CopyEndpointBuiltin:
+		return "builtin"
+	default:
+		return "unknown"
+	}
+}
+
+// CopyEndpoint resolves the per-region overrides and the migrator's global defaults
+// into the single endpoint that volume migration should post to. Proxmod wins if both
+// token endpoints resolve true: the two are alternative implementations of the same
+// operation, and proxmod is the supported one.
+func (c *ProxmoxPool) CopyEndpoint(region string, tokenCopyFallback, proxmodFallback bool) CopyEndpoint {
+	switch {
+	case c.ProxmodEndpoint(region, proxmodFallback):
+		return CopyEndpointProxmod
+	case c.TokenCopyEndpoint(region, tokenCopyFallback):
+		return CopyEndpointCSICopy
+	default:
+		return CopyEndpointBuiltin
+	}
 }
 
 // GetRegions returns supported regions.

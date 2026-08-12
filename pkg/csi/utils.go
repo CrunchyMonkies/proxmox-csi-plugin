@@ -31,7 +31,11 @@ import (
 
 	goproxmox "github.com/sergelogvinov/go-proxmox"
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/metrics"
+	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
+	toolsproxmox "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/proxmox"
 	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -40,9 +44,24 @@ const (
 	// TaskTimeout is the timeout in seconds for all task
 	TaskTimeout = 30
 
+	// copyTaskTimeout bounds how long a snapshot copy (or restore-from-snapshot)
+	// waits for its Proxmox task. Copying a whole volume between storages is
+	// orders of magnitude slower than the config-level operations TaskTimeout is
+	// sized for, so it gets its own constant: 1 hour, matching the 240 polls at
+	// 15s this code waited before it was routed through MoveQemuDisk.
+	copyTaskTimeout = 3600
+
 	// ErrorNotFound not found error message
 	ErrorNotFound string = "not found"
 )
+
+// errStorageNotFound is ErrorNotFound raised because the storage itself is absent
+// from the node, rather than because the volume is missing from a storage that
+// exists. Its message is deliberately ErrorNotFound so the string comparisons
+// callers make keep working unchanged; resolveVolume tells the two apart with
+// errors.Is, because searching a storage that does not exist can only produce
+// noise — PVE answers a content listing on an unknown storage with a 500.
+var errStorageNotFound = errors.New(ErrorNotFound)
 
 // nolint:unused
 func getNodeForVolume(ctx context.Context, cl *goproxmox.APIClient, vol *volume.Volume) (node string, err error) {
@@ -63,7 +82,14 @@ func getNodeForVolume(ctx context.Context, cl *goproxmox.APIClient, vol *volume.
 	return
 }
 
-func getVMByAttachedVolume(ctx context.Context, cl *goproxmox.APIClient, vol *volume.Volume) (int, int, error) {
+// getVMByAttachedVolume finds the VM whose config references vol, skipping
+// skipVMID — the controller's placeholder VM, which owns CSI volumes at rest and
+// is never a publish target.
+//
+// skipVMID is passed in rather than read off the volume: with
+// reassignVolumeOnAttach on, an attached volume is named for the VM holding it, so
+// deriving the id to skip from the name would skip exactly the VM being looked for.
+func getVMByAttachedVolume(ctx context.Context, cl *goproxmox.APIClient, vol *volume.Volume, skipVMID int) (int, int, error) {
 	var err error
 
 	nodes := []string{}
@@ -90,7 +116,7 @@ func getVMByAttachedVolume(ctx context.Context, cl *goproxmox.APIClient, vol *vo
 		}
 
 		// Skip the storage owner VM (e.g., 9999), as the VM uses for the replications
-		if vol.VMID() == fmt.Sprintf("%d", rs.VMID) {
+		if skipVMID != 0 && int(rs.VMID) == skipVMID {
 			return false, nil
 		}
 
@@ -103,7 +129,7 @@ func getVMByAttachedVolume(ctx context.Context, cl *goproxmox.APIClient, vol *vo
 			return false, err
 		}
 
-		if l, exist := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk()); exist {
+		if l, exist := isVolumeAttached(vm.VirtualMachineConfig, volumeMatch(vol)); exist {
 			lun = l
 
 			return true, nil
@@ -133,7 +159,7 @@ func getStorageContent(ctx context.Context, cl *goproxmox.APIClient, vol *volume
 
 	if _, err := cl.GetStorageStatus(ctx, vol.Node(), vol.Storage()); err != nil {
 		if strings.Contains(err.Error(), "No such storage") {
-			return nil, errors.New(ErrorNotFound)
+			return nil, errStorageNotFound
 		}
 
 		return nil, err
@@ -174,6 +200,71 @@ func getVolumeSize(ctx context.Context, cl *goproxmox.APIClient, vol *volume.Vol
 	}
 
 	return int64(st.Size), nil
+}
+
+// volumeMatch returns the string isVolumeAttached should look for in a VM config.
+//
+// With features.reassignVolumeOnAttach on, an attached volume is named for the VM
+// that owns it rather than for the vmid the PV's immutable volumeHandle carries,
+// so matching on the full disk name would miss it. The suffix ('pvc-<uuid>.raw')
+// is the part a rename leaves alone.
+//
+// Disks with no such suffix — anything not in Proxmox's 'vm-<vmid>-<name>' form —
+// cannot be renamed at all, so their full name is already the stable one.
+func volumeMatch(vol *volume.Volume) string {
+	if suffix := vol.DiskSuffix(); suffix != "" {
+		return suffix
+	}
+
+	return vol.Disk()
+}
+
+// resolveVolume returns vol under the name Proxmox currently stores it as.
+//
+// Every path that addresses the volume as storage rather than through a VM config
+// — delete, expand, modify — has to go through here once reassignVolumeOnAttach is
+// in play, or it acts on a name that exists only in Kubernetes.
+//
+// The search is by suffix and adopts whichever vmid it finds, rather than assuming
+// either end of the rename: a controller that died between renaming and attaching
+// (or between detaching and renaming back) leaves the volume on whichever of the
+// two names it reached, and this is what picks it back up.
+//
+// Returns ErrorNotFound when the volume is on neither name, so callers that treat
+// a missing volume as success keep doing so.
+func resolveVolume(ctx context.Context, cl *goproxmox.APIClient, vol *volume.Volume, reassign bool) (*volume.Volume, int64, error) {
+	size, err := getVolumeSize(ctx, cl, vol)
+	if err == nil {
+		return vol, size, nil
+	}
+
+	// The search runs only with the feature on. Its failure modes are not free: a
+	// storage that has been removed from PVE answers a content listing with a 500,
+	// which would turn what is otherwise a clean NotFound into an Internal error and
+	// leave DeleteVolume retrying forever against a PV that can never be satisfied.
+	// With the feature off no volume is ever on a second name, so there is nothing
+	// to search for and the pre-existing behavior is kept exactly.
+	if !reassign || err.Error() != ErrorNotFound || errors.Is(err, errStorageNotFound) || vol.DiskSuffix() == "" {
+		return nil, 0, err
+	}
+
+	found, err := toolsproxmox.FindVolumeBySuffix(ctx, cl, vol)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if found == nil {
+		return nil, 0, errors.New(ErrorNotFound)
+	}
+
+	size, err = getVolumeSize(ctx, cl, found)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	klog.V(4).InfoS("resolveVolume: volume is on another vmid", "volumeID", vol.VolumeID(), "disk", found.Disk())
+
+	return found, size, nil
 }
 
 func isVolumeAttached(vm *proxmox.VirtualMachineConfig, pvc string) (int, bool) {
@@ -389,7 +480,7 @@ func attachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 
 	wwm := ""
 
-	lun, exist := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk())
+	lun, exist := isVolumeAttached(vm.VirtualMachineConfig, volumeMatch(vol))
 	if exist {
 		wwm = hex.EncodeToString([]byte(fmt.Sprintf("PVC-ID%02d", lun)))
 	} else {
@@ -451,7 +542,7 @@ func detachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 		return fmt.Errorf("failed to get vm config: %v", err)
 	}
 
-	if lun, ok := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk()); ok {
+	if lun, ok := isVolumeAttached(vm.VirtualMachineConfig, volumeMatch(vol)); ok {
 		task, err := vm.UnlinkDisk(ctx, fmt.Sprintf("%s%d", deviceNamePrefix, lun), false)
 		if err != nil {
 			return fmt.Errorf("failed to unlink disk: %v", err)
@@ -467,17 +558,90 @@ func detachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 	return nil
 }
 
+// clearUnusedDisk removes the `unused<n>` key that detaching leaves behind for a
+// volume the VM owns. It is safe ONLY once that volume has been renamed away.
+//
+// UnlinkDisk(force=false) does not deallocate: it moves the drive to an `unused<n>`
+// key, because with reassignVolumeOnAttach the volume is genuinely owned by this
+// VM. Deleting that key is what PVE treats as the deallocation — try_deallocate_drive
+// destroys the volume for real if it is still there. Once the volume has been
+// renamed back to the placeholder vmid the key names a path that no longer exists,
+// and deleting it removes the config line and nothing else.
+//
+// The existence check below is the backstop for that: if the referenced volume is
+// still on storage, the key is left in place rather than risking a deallocation.
+// Errors are the caller's to log and ignore — a stale config line is untidy, not
+// harmful.
+func clearUnusedDisk(ctx context.Context, cl *goproxmox.APIClient, id int, vol *volume.Volume) error {
+	vm, err := cl.GetVMConfig(ctx, id)
+	if err != nil {
+		if errors.Is(err, goproxmox.ErrVirtualMachineNotFound) {
+			return nil
+		}
+
+		return fmt.Errorf("failed to get vm config: %v", err)
+	}
+
+	match := volumeMatch(vol)
+
+	for key, disk := range vm.VirtualMachineConfig.MergeUnuseds() {
+		volid := strings.Split(disk, ",")[0]
+		if !strings.Contains(volid, match) {
+			continue
+		}
+
+		storage, name, ok := strings.Cut(volid, ":")
+		if !ok {
+			continue
+		}
+
+		unused := volume.NewVolume(vol.Region(), vol.Zone(), storage, name)
+		unused.SetNode(vol.Node())
+
+		if _, err := getVolumeSize(ctx, cl, unused); err == nil {
+			return fmt.Errorf("refusing to delete %s: volume %s still exists, deleting the key would deallocate it", key, volid)
+		} else if err.Error() != ErrorNotFound {
+			return fmt.Errorf("failed to check whether %s still exists: %v", volid, err)
+		}
+
+		task, err := vm.Config(ctx, proxmox.VirtualMachineOption{Name: "delete", Value: key})
+		if err != nil {
+			return fmt.Errorf("failed to delete %s: %v", key, err)
+		}
+
+		if task != nil {
+			if err := task.WaitFor(ctx, 5*60); err != nil {
+				return fmt.Errorf("failed to wait for %s removal: %w", key, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func updateVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *volume.Volume, options map[string]string) error {
 	vm, err := cl.GetVMConfig(ctx, id)
 	if err != nil {
 		return fmt.Errorf("failed to get vm config: %v", err)
 	}
 
-	if lun, ok := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk()); ok {
+	if lun, ok := isVolumeAttached(vm.VirtualMachineConfig, volumeMatch(vol)); ok {
+		// The volid the VM config already carries, not one rebuilt from vol: with
+		// reassignVolumeOnAttach on, an attached volume is named for this VM while
+		// vol still carries the name from the PV's immutable volumeHandle, and
+		// rebuilding would rewrite the config back to a name that does not exist.
+		volid := fmt.Sprintf("%s:%s", vol.Storage(), vol.Disk())
+
 		disks := vm.VirtualMachineConfig.MergeSCSIs()
 		if disk := disks[deviceNamePrefix+strconv.Itoa(lun)]; disk != "" {
 			params := strings.Split(disk, ",")
-			for _, param := range params {
+			for i, param := range params {
+				if i == 0 {
+					volid = param
+
+					continue
+				}
+
 				kv := strings.Split(param, "=")
 				if len(kv) == 2 && options[kv[0]] == "" {
 					options[kv[0]] = kv[1]
@@ -492,7 +656,7 @@ func updateVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 
 		vmOptions := proxmox.VirtualMachineOption{
 			Name:  deviceNamePrefix + strconv.Itoa(lun),
-			Value: fmt.Sprintf("%s:%s,%s", vol.Storage(), vol.Disk(), strings.Join(opt, ",")),
+			Value: fmt.Sprintf("%s,%s", volid, strings.Join(opt, ",")),
 		}
 
 		task, err := vm.Config(ctx, vmOptions)
@@ -510,7 +674,18 @@ func updateVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 	return fmt.Errorf("volume is not attached to VM %d", id)
 }
 
-func copyVolume(ctx context.Context, cl *goproxmox.APIClient, srcVol *volume.Volume, destVol *volume.Volume) error {
+// copyVolume copies srcVol to destVol, used by snapshot creation and by
+// restore-from-snapshot. endpoint selects the server-side copy implementation:
+// the built-in content copy needs root@pam, the other two accept a scoped API
+// token. See pkg/tools/proxmox.MoveQemuDisk for the per-endpoint request shapes
+// and docs/volumesnapshot.md for the credentials each one needs.
+func copyVolume(
+	ctx context.Context,
+	cl *goproxmox.APIClient,
+	srcVol *volume.Volume,
+	destVol *volume.Volume,
+	endpoint pxpool.CopyEndpoint,
+) error {
 	if srcVol.Node() == "" {
 		return errors.New("node is required")
 	}
@@ -519,36 +694,12 @@ func copyVolume(ctx context.Context, cl *goproxmox.APIClient, srcVol *volume.Vol
 		return errors.New("volume disk must not be qcow2 format")
 	}
 
-	params := map[string]interface{}{
-		"target": destVol.Disk(),
+	node := srcVol.Node()
+	if destVol.Node() != "" {
+		node = destVol.Node()
 	}
 
-	if srcVol.Node() != destVol.Node() && destVol.Node() != "" {
-		params["target_node"] = destVol.Node()
-	}
-
-	// POST https://pve.proxmox.com/pve-docs/api-viewer/index.html#/nodes/{node}/storage/{storage}/content/{volume}
-	// Copy a volume. This is experimental code - do not use.
-	var upid proxmox.UPID
-	if err := cl.Client.Post(ctx, fmt.Sprintf("/nodes/%s/storage/%s/content/%s", srcVol.Node(), srcVol.Storage(), srcVol.Disk()), params, &upid); err != nil {
-		return fmt.Errorf("failed to copy pvc: %v, params=%+v", err, params)
-	}
-
-	task := proxmox.NewTask(upid, cl.Client)
-	if task != nil {
-		_, completed, err := task.WaitForCompleteStatus(ctx, 4*60, 15)
-		if err != nil {
-			return fmt.Errorf("unable to delete virtual machine disk: %w", err)
-		}
-
-		if completed {
-			return nil
-		}
-
-		return fmt.Errorf("failed to copy disk, exit status: %s", task.ExitStatus)
-	}
-
-	return nil
+	return toolsproxmox.MoveQemuDisk(ctx, cl, srcVol, node, destVol, copyTaskTimeout, endpoint)
 }
 
 func waitAttachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *volume.Volume) error {
@@ -558,7 +709,7 @@ func waitAttachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol 
 			return fmt.Errorf("failed to get vm config: %v", err)
 		}
 
-		if _, ok := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk()); ok {
+		if _, ok := isVolumeAttached(vm.VirtualMachineConfig, volumeMatch(vol)); ok {
 			return nil
 		}
 
@@ -586,7 +737,7 @@ func waitDetachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol 
 			return fmt.Errorf("failed to get vm config: %v", err)
 		}
 
-		if _, ok := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk()); ok {
+		if _, ok := isVolumeAttached(vm.VirtualMachineConfig, volumeMatch(vol)); ok {
 			return retry.ExpectedError(fmt.Errorf("volume %s still attached to VM %d", vol.VolumeID(), id))
 		}
 

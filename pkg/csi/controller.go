@@ -37,6 +37,7 @@ import (
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/helpers/ptr"
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/metrics"
 	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
+	toolsproxmox "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/proxmox"
 	utilsnode "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/node"
 	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
 
@@ -75,6 +76,11 @@ type ControllerService struct {
 	Provider csiconfig.Provider
 	vmID     int
 
+	// reassignVolumeOnAttach mirrors cfg.Features.ReassignVolumeOnAttach: whether
+	// ControllerPublishVolume reassigns a volume's Proxmox ownership (vmid) to the
+	// real target VM at attach time. See docs/reassign-volume-on-attach.md.
+	reassignVolumeOnAttach bool
+
 	storageCapacity *cache.Cache
 	vmLocks         *VMLocks
 }
@@ -92,10 +98,11 @@ func NewControllerService(kclient kubernetes.Interface, cloudConfig string) (*Co
 	}
 
 	d := &ControllerService{
-		pxpool:   px,
-		kclient:  kclient,
-		Provider: cfg.Features.Provider,
-		vmID:     cfg.Features.ControllerVMID,
+		pxpool:                 px,
+		kclient:                kclient,
+		Provider:               cfg.Features.Provider,
+		vmID:                   cfg.Features.ControllerVMID,
+		reassignVolumeOnAttach: cfg.Features.ReassignVolumeOnAttach,
 	}
 
 	d.Init()
@@ -349,7 +356,7 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 				return nil, status.Errorf(codes.InvalidArgument, "storage mismatch: requested storage %s does not match snapshot storage %s", vol.Storage(), srcVol.Storage())
 			}
 
-			if err = copyVolume(ctx, cl, srcVol, vol); mc.ObserveRequest(err) != nil {
+			if err = copyVolume(ctx, cl, srcVol, vol, d.pxpool.CopyEndpoint(region, false, false)); mc.ObserveRequest(err) != nil {
 				return nil, status.Error(codes.Internal, err.Error())
 			}
 		} else {
@@ -556,6 +563,37 @@ func (d *ControllerService) ControllerPublishVolume(ctx context.Context, request
 		}
 	}
 
+	// Give the volume the name the target VM owns, BEFORE attaching it. Opt-in
+	// only: see docs/reassign-volume-on-attach.md. The rename has to happen while
+	// the volume is unattached — the endpoint refuses a volume any VM config
+	// references, and renaming an attached one would dangle that reference — so
+	// there is no ordering in which a volume can be reassigned after attach.
+	//
+	// This does not rewrite the PV's spec.csi.volumeHandle, which is immutable.
+	// The handle stays correct at rest instead: ControllerUnpublishVolume renames
+	// back to the placeholder vmid after detaching, and while attached the volume
+	// is found by the part of its name a rename does not change (volumeMatch).
+	//
+	// A failed rename must never fail the attach. The volume is still perfectly
+	// usable under its old name, and the one lesson from the 2026-08-12 live test
+	// is that this feature must not be able to take attach down cluster-wide.
+	//
+	// Volumes with no known node are skipped: the endpoint is node-scoped, and a
+	// shared storage's node is whichever one the driver happens to reach it from.
+	if d.reassignVolumeOnAttach && vol.Node() != "" && vol.VMID() != strconv.Itoa(id) {
+		mc := metrics.NewMetricContext("renameVolume")
+
+		renamed, err := toolsproxmox.RenameVolume(ctx, cl, vol, id)
+		if mc.ObserveRequest(err) != nil {
+			klog.ErrorS(err, "ControllerPublishVolume: failed to rename volume, attaching under its current name",
+				"cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
+		} else {
+			klog.V(4).InfoS("ControllerPublishVolume: volume renamed", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "disk", renamed.Disk(), "vmID", id)
+
+			vol = renamed
+		}
+	}
+
 	mc := metrics.NewMetricContext("attachVolume")
 
 	pvInfo, err := attachVolume(ctx, cl, id, vol, params.ToCFG())
@@ -649,6 +687,34 @@ func (d *ControllerService) ControllerUnpublishVolume(ctx context.Context, reque
 		klog.ErrorS(err, "ControllerUnpublishVolume: failed to wait for volume detachment", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
 
 		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// Restore the name the PV's volumeHandle carries, so the volume is addressable
+	// by its VolumeID again for every RPC that runs while it is at rest — delete,
+	// snapshot, and a publish to some other node.
+	//
+	// Order is load bearing. Detaching a volume the VM owns leaves an `unused<n>`
+	// key behind, and deleting that key is how PVE deallocates the volume: it must
+	// be cleared only after the rename has moved the volume out from under it. Both
+	// steps are best effort; checkVolume finds the volume by suffix either way.
+	//
+	// The name to restore is the controller's own placeholder id, not vol.VMID():
+	// checkVolume has already rewritten vol's disk to the name Proxmox stores it
+	// under, which while attached is the target VM's, so reading the id back off
+	// the volume would ask for a rename to where it already is.
+	if curVMID, err := strconv.Atoi(vol.VMID()); err == nil && d.reassignVolumeOnAttach && vol.Node() != "" && curVMID != d.vmID {
+		mc := metrics.NewMetricContext("renameVolume")
+
+		renamed, err := toolsproxmox.RenameVolume(ctx, cl, vol, d.vmID)
+		if mc.ObserveRequest(err) != nil {
+			klog.ErrorS(err, "ControllerUnpublishVolume: failed to rename volume back", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
+		} else {
+			klog.V(4).InfoS("ControllerUnpublishVolume: volume renamed back", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "disk", renamed.Disk(), "vmID", id)
+
+			if err := clearUnusedDisk(ctx, cl, id, renamed); err != nil {
+				klog.ErrorS(err, "ControllerUnpublishVolume: failed to clear unused disk entry", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
+			}
+		}
 	}
 
 	klog.V(3).InfoS("ControllerUnpublishVolume: volume unpublished", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "nodeID", n.String())
@@ -851,7 +917,7 @@ func (d *ControllerService) CreateSnapshot(ctx context.Context, request *csi.Cre
 			return nil, status.Error(codes.Internal, err.Error())
 		}
 
-		err = copyVolume(ctx, cl, vol, snapshotID)
+		err = copyVolume(ctx, cl, vol, snapshotID, d.pxpool.CopyEndpoint(vol.Region(), false, false))
 		if err != nil {
 			klog.ErrorS(err, "CreateSnapshot: failed to create snapshot", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "snapshotID", snapshotID.VolumeID())
 
@@ -973,7 +1039,7 @@ func (d *ControllerService) ControllerExpandVolume(ctx context.Context, request 
 
 	// FIXME: check current size and skip resize if not needed
 
-	id, lun, err := getVMByAttachedVolume(ctx, cl, vol)
+	id, lun, err := getVMByAttachedVolume(ctx, cl, vol, d.vmID)
 	if err != nil || id == 0 {
 		if err == goproxmox.ErrVirtualMachineNotFound {
 			klog.V(3).InfoS("ControllerExpandVolume: volume is not published, cannot resize unpublished volumeID", "cluster", vol.Cluster(), "volumeID", vol.VolumeID())
@@ -1043,7 +1109,7 @@ func (d *ControllerService) ControllerModifyVolume(ctx context.Context, request 
 		return nil, err
 	}
 
-	id, _, err := getVMByAttachedVolume(ctx, cl, vol)
+	id, _, err := getVMByAttachedVolume(ctx, cl, vol, d.vmID)
 	if err != nil || id == 0 {
 		if err == goproxmox.ErrVirtualMachineNotFound {
 			klog.V(3).InfoS("ControllerModifyVolume: volume is not published, cannot modify unpublished volumeID", "cluster", vol.Cluster(), "volumeID", vol.VolumeID())
@@ -1102,6 +1168,16 @@ func (d *ControllerService) getVMIDbyNode(ctx context.Context, nodeName string) 
 	return id, "", nil
 }
 
+// checkVolume returns the size of the volume, and is the one step every RPC that
+// touches an existing volume passes through first.
+//
+// It resolves the volume before reporting on it, and updates vol's disk name to
+// the one Proxmox currently stores it under. With features.reassignVolumeOnAttach
+// the two differ for as long as the volume is attached — the PV's volumeHandle is
+// immutable, the disk is renamed for the VM that owns it — so without this every
+// caller downstream would address a name that exists only in Kubernetes, and
+// ControllerUnpublishVolume in particular would read the resulting NotFound as
+// "already detached" and leave the volume attached for good.
 func (d *ControllerService) checkVolume(ctx context.Context, vol *volume.Volume) (int64, error) {
 	cl, err := d.pxpool.GetProxmoxCluster(vol.Cluster())
 	if err != nil {
@@ -1134,7 +1210,7 @@ func (d *ControllerService) checkVolume(ctx context.Context, vol *volume.Volume)
 		for _, n := range nodes {
 			probeVol.SetNode(n)
 
-			size, err := getVolumeSize(ctx, cl, probeVol)
+			resolved, size, err := resolveVolume(ctx, cl, probeVol, d.reassignVolumeOnAttach)
 			if err != nil {
 				if err.Error() == ErrorNotFound {
 					continue
@@ -1145,13 +1221,15 @@ func (d *ControllerService) checkVolume(ctx context.Context, vol *volume.Volume)
 
 			klog.V(5).InfoS("checkVolume: determined node for volume", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "node", n)
 
+			vol.SetDisk(resolved.Disk())
+
 			return size, nil
 		}
 
 		return 0, status.Errorf(codes.NotFound, "volume %s not found in any node for storage %s", vol.VolumeID(), vol.Storage())
 	}
 
-	size, err := getVolumeSize(ctx, cl, vol)
+	resolved, size, err := resolveVolume(ctx, cl, vol, d.reassignVolumeOnAttach)
 	if err != nil {
 		if err.Error() == ErrorNotFound {
 			return 0, status.Errorf(codes.NotFound, "volume %s not found", vol.VolumeID())
@@ -1159,6 +1237,8 @@ func (d *ControllerService) checkVolume(ctx context.Context, vol *volume.Volume)
 
 		return 0, status.Error(codes.Internal, err.Error())
 	}
+
+	vol.SetDisk(resolved.Disk())
 
 	return size, nil
 }
