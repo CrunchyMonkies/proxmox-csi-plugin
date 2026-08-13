@@ -112,6 +112,24 @@ func (c *migrateCmd) migrationValidate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to read config: %v", err)
 	}
 
+	namespace, _ := flags.GetString("namespace") //nolint: errcheck
+
+	kclientConfig, namespace, err := tools.BuildConfig(kubeconfig, namespace)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes config: %v", err)
+	}
+
+	c.kclient, err = clientkubernetes.NewForConfig(kclientConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client: %v", err)
+	}
+
+	c.namespace = namespace
+
+	if err := pxpool.ResolveTokenRefs(context.TODO(), c.kclient, namespace, cfg.Clusters); err != nil {
+		return fmt.Errorf("failed to resolve token refs: %v", err)
+	}
+
 	tokenCopyEndpoint, _ := flags.GetBool(flagTokenCopyEndpoint) //nolint: errcheck
 	proxmodEndpoint, _ := flags.GetBool(flagProxmodEndpoint)     //nolint: errcheck
 
@@ -127,20 +145,6 @@ func (c *migrateCmd) migrationValidate(cmd *cobra.Command, _ []string) error {
 	if err = c.pclient.CheckClusters(context.TODO()); err != nil {
 		return fmt.Errorf("failed to initialize Proxmox clusters: %v", err)
 	}
-
-	namespace, _ := flags.GetString("namespace") //nolint: errcheck
-
-	kclientConfig, namespace, err := tools.BuildConfig(kubeconfig, namespace)
-	if err != nil {
-		return fmt.Errorf("failed to create kubernetes config: %v", err)
-	}
-
-	c.kclient, err = clientkubernetes.NewForConfig(kclientConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create kubernetes client: %v", err)
-	}
-
-	c.namespace = namespace
 
 	accessCheck := []rbacv1.ResourceAttributes{
 		{Group: "", Namespace: "", Resource: "persistentvolumeclaims", Verb: "create"},

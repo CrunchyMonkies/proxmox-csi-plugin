@@ -315,6 +315,20 @@ func (c *evacuateCmd) evacuateValidate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to read config: %v", err)
 	}
 
+	kclientConfig, namespace, err := tools.BuildConfig(kubeconfig, "")
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes config: %v", err)
+	}
+
+	c.kclient, err = clientkubernetes.NewForConfig(kclientConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client: %v", err)
+	}
+
+	if err := pxpool.ResolveTokenRefs(context.TODO(), c.kclient, namespace, cfg.Clusters); err != nil {
+		return fmt.Errorf("failed to resolve token refs: %v", err)
+	}
+
 	// Synchronous migration moves disks through the Proxmox API and needs copy
 	// credentials (root@pam, or an API token with --token-copy-endpoint or
 	// --proxmod-endpoint);
@@ -339,16 +353,6 @@ func (c *evacuateCmd) evacuateValidate(cmd *cobra.Command, _ []string) error {
 
 	if err = c.pclient.CheckClusters(context.TODO()); err != nil {
 		return fmt.Errorf("failed to initialize Proxmox clusters: %v", err)
-	}
-
-	kclientConfig, _, err := tools.BuildConfig(kubeconfig, "")
-	if err != nil {
-		return fmt.Errorf("failed to create kubernetes config: %v", err)
-	}
-
-	c.kclient, err = clientkubernetes.NewForConfig(kclientConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create kubernetes client: %v", err)
 	}
 
 	accessCheck := []rbacv1.ResourceAttributes{

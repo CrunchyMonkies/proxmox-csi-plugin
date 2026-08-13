@@ -18,6 +18,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get","list", "watch", "create", "update", "patch"]
+  # Resolve token_ref cluster credentials from a Secret
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses"]

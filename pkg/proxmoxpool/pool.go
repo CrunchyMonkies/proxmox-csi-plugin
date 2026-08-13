@@ -42,9 +42,13 @@ type ProxmoxCluster struct {
 	TokenIDFile     string `yaml:"token_id_file,omitempty"`
 	TokenSecret     string `yaml:"token_secret,omitempty"`
 	TokenSecretFile string `yaml:"token_secret_file,omitempty"`
-	Username        string `yaml:"username,omitempty"`
-	Password        string `yaml:"password,omitempty"`
-	Region          string `yaml:"region,omitempty"`
+	// TokenRef references a Kubernetes Secret containing both the token ID and
+	// token secret, resolved at startup via ResolveTokenRefs. Alternative to
+	// TokenID/TokenIDFile and TokenSecret/TokenSecretFile.
+	TokenRef *TokenRef `yaml:"token_ref,omitempty"`
+	Username string    `yaml:"username,omitempty"`
+	Password string    `yaml:"password,omitempty"`
+	Region   string    `yaml:"region,omitempty"`
 
 	// TokenCopyEndpoint selects, per cluster, whether volume migration copies via
 	// the permission-gated endpoint from hack/pve-token-copy (token-authorized)
@@ -67,6 +71,21 @@ type ProxmoxCluster struct {
 	// Used by volume migration when the source storage name does not exist
 	// on the target node.
 	PrimaryStorage map[string]string `yaml:"primary_storage,omitempty"`
+}
+
+// TokenRef references a Kubernetes Secret holding both the Proxmox API token
+// ID and token secret, resolved via ResolveTokenRefs.
+type TokenRef struct {
+	// Name of the Secret.
+	Name string `yaml:"name"`
+	// Namespace of the Secret. Defaults to the caller's resolved namespace
+	// (the controller's own namespace, or pvecsictl's kubeconfig namespace)
+	// when omitted.
+	Namespace string `yaml:"namespace,omitempty"`
+	// TokenIDKey is the Secret data key holding the token ID. Defaults to "token_id".
+	TokenIDKey string `yaml:"tokenIdKey,omitempty"`
+	// TokenSecretKey is the Secret data key holding the token secret. Defaults to "token_secret".
+	TokenSecretKey string `yaml:"tokenSecretKey,omitempty"`
 }
 
 // ProxmoxPool is a Proxmox client pool of proxmox clusters.

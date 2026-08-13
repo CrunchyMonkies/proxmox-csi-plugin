@@ -215,6 +215,66 @@ clusters:
 			},
 		},
 		{
+			msg: "valid config with token_ref",
+			config: strings.NewReader(`
+clusters:
+  - url: https://example.com
+    insecure: false
+    token_ref:
+      name: proxmox-token
+      namespace: kube-system
+      tokenIdKey: id
+      tokenSecretKey: secret
+    region: cluster-1
+`),
+			expected: &providerconfig.ClustersConfig{
+				Features: providerconfig.ClustersFeatures{
+					Provider:       providerconfig.ProviderDefault,
+					ControllerVMID: providerconfig.DefaultControllerVMID,
+				},
+				Clusters: []*pxpool.ProxmoxCluster{
+					{
+						URL:      "https://example.com",
+						Insecure: false,
+						TokenRef: &pxpool.TokenRef{
+							Name:           "proxmox-token",
+							Namespace:      "kube-system",
+							TokenIDKey:     "id",
+							TokenSecretKey: "secret",
+						},
+						Region: "cluster-1",
+					},
+				},
+			},
+		},
+		{
+			msg: "token_ref conflicts with inline token_id",
+			config: strings.NewReader(`
+clusters:
+  - url: https://example.com
+    insecure: false
+    token_id: "ha"
+    token_ref:
+      name: proxmox-token
+    region: cluster-1
+`),
+			expectedError: providerconfig.ErrInvalidAuthCredentials.Error(),
+		},
+		{
+			msg: "token_ref conflicts with username/password",
+			config: strings.NewReader(`
+clusters:
+  - url: https://example.com
+    insecure: false
+    username: "user@pam"
+    password: "secret"
+    token_ref:
+      name: proxmox-token
+    region: cluster-1
+`),
+			expectedError: providerconfig.ErrInvalidAuthCredentials.Error(),
+		},
+		{
 			msg: "provider capmox",
 			config: strings.NewReader(`
 features:

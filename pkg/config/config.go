@@ -82,6 +82,46 @@ var (
 	ErrInvalidVMID            = errors.New("invalid VM ID, must be greater than 100")
 )
 
+// validateCluster checks that a single cluster entry has exactly one valid
+// credential source and the required region/URL fields.
+func validateCluster(idx int, c *pxpool.ProxmoxCluster) error {
+	hasTokenIDInline := c.TokenID != ""
+	hasTokenIDFile := c.TokenIDFile != ""
+	hasTokenSecretInline := c.TokenSecret != ""
+	hasTokenSecretFile := c.TokenSecretFile != ""
+	hasTokenRef := c.TokenRef != nil && c.TokenRef.Name != ""
+
+	if (hasTokenIDInline && hasTokenIDFile) || (hasTokenSecretInline && hasTokenSecretFile) {
+		return fmt.Errorf("cluster #%d: %w", idx+1, ErrInvalidAuthCredentials)
+	}
+
+	if hasTokenRef && (hasTokenIDInline || hasTokenIDFile || hasTokenSecretInline || hasTokenSecretFile) {
+		return fmt.Errorf("cluster #%d: %w", idx+1, ErrInvalidAuthCredentials)
+	}
+
+	hasTokenID := hasTokenIDInline || hasTokenIDFile || hasTokenRef
+	hasTokenSecret := hasTokenSecretInline || hasTokenSecretFile || hasTokenRef
+
+	hasUserAuth := c.Username != "" && c.Password != ""
+	if (hasTokenID && hasUserAuth) || (hasTokenSecret && hasUserAuth) {
+		return fmt.Errorf("cluster #%d: %w", idx+1, ErrInvalidAuthCredentials)
+	}
+
+	if !(hasTokenID && hasTokenSecret) && !hasUserAuth {
+		return fmt.Errorf("cluster #%d: %w", idx+1, ErrAuthCredentialsMissing)
+	}
+
+	if c.Region == "" {
+		return fmt.Errorf("cluster #%d: %w", idx+1, ErrMissingPVERegion)
+	}
+
+	if c.URL == "" || !strings.HasPrefix(c.URL, "http") {
+		return fmt.Errorf("cluster #%d: %w", idx+1, ErrMissingPVEAPIURL)
+	}
+
+	return nil
+}
+
 // ReadCloudConfig reads cloud config from a reader.
 func ReadCloudConfig(config io.Reader) (ClustersConfig, error) {
 	cfg := ClustersConfig{}
@@ -93,33 +133,8 @@ func ReadCloudConfig(config io.Reader) (ClustersConfig, error) {
 	}
 
 	for idx, c := range cfg.Clusters {
-		hasTokenIDInline := c.TokenID != ""
-		hasTokenIDFile := c.TokenIDFile != ""
-		hasTokenSecretInline := c.TokenSecret != ""
-		hasTokenSecretFile := c.TokenSecretFile != ""
-
-		if (hasTokenIDInline && hasTokenIDFile) || (hasTokenSecretInline && hasTokenSecretFile) {
-			return ClustersConfig{}, fmt.Errorf("cluster #%d: %w", idx+1, ErrInvalidAuthCredentials)
-		}
-
-		hasTokenID := hasTokenIDInline || hasTokenIDFile
-		hasTokenSecret := hasTokenSecretInline || hasTokenSecretFile
-
-		hasUserAuth := c.Username != "" && c.Password != ""
-		if (hasTokenID && hasUserAuth) || (hasTokenSecret && hasUserAuth) {
-			return ClustersConfig{}, fmt.Errorf("cluster #%d: %w", idx+1, ErrInvalidAuthCredentials)
-		}
-
-		if !(hasTokenID && hasTokenSecret) && !hasUserAuth {
-			return ClustersConfig{}, fmt.Errorf("cluster #%d: %w", idx+1, ErrAuthCredentialsMissing)
-		}
-
-		if c.Region == "" {
-			return ClustersConfig{}, fmt.Errorf("cluster #%d: %w", idx+1, ErrMissingPVERegion)
-		}
-
-		if c.URL == "" || !strings.HasPrefix(c.URL, "http") {
-			return ClustersConfig{}, fmt.Errorf("cluster #%d: %w", idx+1, ErrMissingPVEAPIURL)
+		if err := validateCluster(idx, c); err != nil {
+			return ClustersConfig{}, err
 		}
 	}
 

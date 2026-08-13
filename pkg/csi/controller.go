@@ -86,10 +86,14 @@ type ControllerService struct {
 }
 
 // NewControllerService returns a new controller service
-func NewControllerService(kclient kubernetes.Interface, cloudConfig string) (*ControllerService, error) {
+func NewControllerService(kclient kubernetes.Interface, cloudConfig string, namespace string) (*ControllerService, error) {
 	cfg, err := csiconfig.ReadCloudConfigFromFile(cloudConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config: %v", err)
+	}
+
+	if err := pxpool.ResolveTokenRefs(context.Background(), kclient, namespace, cfg.Clusters); err != nil {
+		return nil, fmt.Errorf("failed to resolve token refs: %v", err)
 	}
 
 	px, err := pxpool.NewProxmoxPool(cfg.Clusters)
