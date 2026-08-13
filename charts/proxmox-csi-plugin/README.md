@@ -1,6 +1,6 @@
 # proxmox-csi-plugin
 
-![Version: 0.11.0](https://img.shields.io/badge/Version-0.11.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.4.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.4.0-informational?style=flat-square)
+![Version: 0.12.0](https://img.shields.io/badge/Version-0.12.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.4.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.4.0-informational?style=flat-square)
 
 Container Storage Interface plugin for Proxmox
 
@@ -163,7 +163,7 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | affinity | object | `{}` | Affinity for controller assignment. ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity |
 | extraVolumes | list | `[]` | Additional volumes for Pods |
 | extraVolumeMounts | list | `[]` |  |
-| migrator | object | `{"config":{"clusters":[]},"detachTimeout":"5m","drainTimeout":"10m","enabled":false,"existingConfigSecret":null,"existingConfigSecretKey":"config.yaml","extraArgs":[],"helperVMID":9998,"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/pvecsictl","tag":""},"leaderElection":true,"maxAttempts":5,"metrics":{"enabled":false,"port":8081},"podFollow":false,"reactiveEvacuation":{"enabled":false,"grace":"2m"},"rebalance":{"enabled":false,"extraArgs":[],"highThreshold":0.8,"lowThreshold":0.6,"maxMigrations":2,"schedule":"0 3 * * *","window":"","windowTz":"UTC"},"replicaCount":1,"resources":{"requests":{"cpu":"10m","memory":"32Mi"}},"taskTimeout":10800}` | Volume migration controller (pvecsictl controller). Watches PVCs for csi.proxmox.sinextra.dev/migrate-node annotations and Nodes for csi.proxmox.sinextra.dev/evacuate annotations, and migrates the backing Proxmox disks automatically. Requires Proxmox root credentials. |
+| migrator | object | `{"config":{"clusters":[]},"detachTimeout":"5m","drainTimeout":"10m","enabled":false,"existingConfigSecret":null,"existingConfigSecretKey":"config.yaml","extraArgs":[],"helperVMID":9998,"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/pvecsictl","tag":""},"leaderElection":true,"maxAttempts":5,"metrics":{"enabled":false,"port":8081},"podFollow":false,"reactiveEvacuation":{"enabled":false,"grace":"2m"},"rebalance":{"enabled":false,"extraArgs":[],"highThreshold":0.8,"lowThreshold":0.6,"maxMigrations":2,"schedule":"0 3 * * *","window":"","windowTz":"UTC"},"replicaCount":1,"resources":{"requests":{"cpu":"10m","memory":"32Mi"}},"taskTimeout":10800}` | Volume migration controller (pvecsictl controller). Watches PVCs for proxmox.crunchymonkies.com/migrate-node annotations and Nodes for proxmox.crunchymonkies.com/evacuate annotations, and migrates the backing Proxmox disks automatically. Requires Proxmox root credentials. |
 | migrator.enabled | bool | `false` | Enable the migration controller deployment. |
 | migrator.replicaCount | int | `1` | Number of replicas; leader election ensures only one acts. |
 | migrator.image.repository | string | `"ghcr.io/crunchymonkies/pvecsictl"` | Migrator (pvecsictl) image. |

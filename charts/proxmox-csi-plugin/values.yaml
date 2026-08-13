@@ -382,8 +382,8 @@ extraVolumeMounts: []
 #   subPath: ca.crt
 
 # -- Volume migration controller (pvecsictl controller).
-# Watches PVCs for csi.proxmox.sinextra.dev/migrate-node annotations and Nodes
-# for csi.proxmox.sinextra.dev/evacuate annotations, and migrates the backing
+# Watches PVCs for proxmox.crunchymonkies.com/migrate-node annotations and Nodes
+# for proxmox.crunchymonkies.com/evacuate annotations, and migrates the backing
 # Proxmox disks automatically. Requires Proxmox root credentials.
 migrator:
   # -- Enable the migration controller deployment.

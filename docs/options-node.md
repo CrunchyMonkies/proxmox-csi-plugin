@@ -10,13 +10,17 @@ metadata:
   ...
   annotations:
     # Proxmox Virtual Machine ID to help identify the node (optional)
-    proxmox.sinextra.dev/instance-id: "VM-ID"
+    # The legacy proxmox.sinextra.dev/instance-id annotation, which is what the
+    # upstream Proxmox CCM writes, is still read when this one is absent.
+    proxmox.crunchymonkies.com/instance-id: "VM-ID"
 
   labels:
     # Topology labels to override default node topology labels (optional)
     # Note: Kubernetes scheduler uses only default topology labels - topology.kubernetes.io/region and topology.kubernetes.io/zone
-    topology.proxmox.sinextra.dev/region: cluster-1
-    topology.proxmox.sinextra.dev/zone: pve-node-1
+    # The legacy topology.proxmox.sinextra.dev/{region,node} labels written by
+    # the upstream Proxmox CCM are still read when these are absent.
+    topology.proxmox.crunchymonkies.com/region: cluster-1
+    topology.proxmox.crunchymonkies.com/node: pve-node-1
 
     # Default Kubernetes topology labels
     topology.kubernetes.io/region: cluster-1

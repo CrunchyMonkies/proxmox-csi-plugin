@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -26,6 +25,7 @@ import (
 
 	csiconfig "github.com/sergelogvinov/proxmox-csi-plugin/pkg/config"
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi"
+	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/helpers/ptr"
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/migrator"
 	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
 	tools "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/kubernetes"
@@ -282,25 +282,35 @@ func (c *evacuateCmd) runEvacuate(cmd *cobra.Command, args []string) error {
 // annotatePVCMigration stamps the migration request annotations on a PVC.
 // targetStorage is optional: when set, the volume also moves into that storage
 // on the target zone (cross-storage migration).
+//
+// Like every other write to a PVC, the patch also folds any legacy-stamped
+// keys onto the canonical namespace, so producing a request migrates the
+// object off the old prefix as well.
 func annotatePVCMigration(ctx context.Context, kclient clientkubernetes.Interface, namespace, name, target, targetStorage string, force bool) error {
-	annotations := map[string]string{
-		migrator.AnnotationMigrateNode: target,
+	annotations := map[string]*string{
+		migrator.AnnotationMigrateNode: &target,
 	}
 	if targetStorage != "" {
-		annotations[migrator.AnnotationMigrateStorage] = targetStorage
+		annotations[migrator.AnnotationMigrateStorage] = &targetStorage
 	}
 
 	if force {
-		annotations[migrator.AnnotationMigrateForce] = "true"
+		annotations[migrator.AnnotationMigrateForce] = ptr.Ptr("true")
 	}
 
-	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": annotations}})
+	client := kclient.CoreV1().PersistentVolumeClaims(namespace)
+
+	pvc, err := client.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to read PVC %s/%s: %v", namespace, name, err)
+	}
+
+	patch, err := migrator.AnnotationsPatch(migrator.NormalizeLegacy(pvc.Annotations, annotations))
 	if err != nil {
 		return err
 	}
 
-	_, err = kclient.CoreV1().PersistentVolumeClaims(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
-	if err != nil {
+	if _, err = client.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("failed to annotate PVC %s/%s: %v", namespace, name, err)
 	}
 
