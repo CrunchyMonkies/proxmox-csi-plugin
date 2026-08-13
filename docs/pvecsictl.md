@@ -158,7 +158,8 @@ you can force the process by adding the `--force` flag.
 
 Forced migration needs the Proxmox VMID of the node running the pods. The
 node's `proxmox://<region>/<vmid>` providerID (set by the Proxmox CCM) or the
-`proxmox.sinextra.dev/instance-id` annotation is used when present; otherwise
+`proxmox.crunchymonkies.com/instance-id` annotation (the legacy
+`proxmox.sinextra.dev/instance-id` is still read) is used when present; otherwise
 the migrator finds the VM through the Proxmox API — by node-name prefix
 verified against the node's SMBIOS system UUID, then by system UUID alone —
 the same lookup the CSI controller uses for attaching volumes, so clusters
@@ -339,7 +340,7 @@ persistentvolumeclaim/storage-test-1   Bound    pvc-e248bc56-dcf4-4145-93b9-a374
 
 Evacuate all CSI volumes from a Proxmox node (zone), e.g. before node maintenance.
 
-By default, evacuate stamps `csi.proxmox.sinextra.dev/migrate-node` annotations on the affected PVCs and lets the [migration controller](migration-controller.md) execute them one at a time. With `--now` it runs the migrations synchronously (requires root credentials in the config, like `migrate`).
+By default, evacuate stamps `proxmox.crunchymonkies.com/migrate-node` annotations on the affected PVCs and lets the [migration controller](migration-controller.md) execute them one at a time (the legacy `csi.proxmox.sinextra.dev/*` annotation keys remain accepted for compatibility). With `--now` it runs the migrations synchronously (requires root credentials in the config, like `migrate`).
 
 Target selection understands per-zone storage names: a zone hosting the volume's own storage name is preferred, but on clusters where every zone has its own storage the candidates come from the storages named by the driver's StorageClasses (the cluster-default class first). When the chosen — or explicitly `--target`ed — zone does not host the source storage name, evacuate also stamps `migrate-storage` (or passes the target storage in `--now` mode).
 
@@ -357,7 +358,7 @@ pvecsictl evacuate --config=hack/cloud-config.yaml hvm-1 --target hvm-2 --force 
 Alternatively, annotate the Kubernetes node directly (no CLI needed):
 
 ```shell
-kubectl annotate node kube-store-11 csi.proxmox.sinextra.dev/evacuate=auto
+kubectl annotate node kube-store-11 proxmox.crunchymonkies.com/evacuate=auto
 ```
 
 ### Rebalance

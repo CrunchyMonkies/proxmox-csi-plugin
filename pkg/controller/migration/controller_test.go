@@ -1063,6 +1063,17 @@ func TestEnqueueFilters(t *testing.T) {
 	assert.Equal(t, 1, c.followQueue.Len(), "scheduled pod with a PVC must be enqueued")
 }
 
+// legacyKey returns the legacy upstream variant of a canonical annotation key
+// (via the exported mapping, so tests never reference the deprecated aliases).
+func legacyKey(t *testing.T, key string) string {
+	t.Helper()
+
+	legacy := migrator.LegacyAnnotation(key)
+	require.NotEmpty(t, legacy)
+
+	return legacy
+}
+
 // ownedPVC returns the test PVC with a controller ownerReference of the given
 // apiVersion/kind (the shape an operator or workload controller stamps).
 func ownedPVC(apiVersion, kind string, annotations map[string]string) *corev1.PersistentVolumeClaim {
@@ -1167,4 +1178,130 @@ func TestReconcileReactiveAnnotationFalse(t *testing.T) {
 
 	pvc := getPVC(t, c)
 	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode], "reactive-evacuation=false must always skip")
+}
+
+func TestReconcileReactiveLegacyAnnotationFalse(t *testing.T) {
+	// The same opt-out stamped under the LEGACY upstream key: the gate reads
+	// through GetAnnotation, so a PVC protected before the rename must stay
+	// protected after it. No Proxmox responders — reaching autoTarget fails.
+	c, _, _ := newReactiveController(t,
+		newPVC(map[string]string{legacyKey(t, migrator.AnnotationReactiveEvacuation): "false"}),
+		newPV("vm-9999-pvc-exist", nil),
+		cordonedNode(),
+		newUnschedulablePod(5*time.Minute))
+
+	err := c.reconcileReactivePod(context.Background(), testNS+"/test-0")
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode], "legacy reactive-evacuation=false must always skip")
+}
+
+func TestReconcilePVCLegacyAnnotationSuccess(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	disk := "vm-9999-pvc-exist"
+	upid := "UPID:pve-1:003B4235:1DF4ABCA:667C1C45:qmmove:103:root@pam:"
+	moved := false
+
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`+disk,
+		func(_ *http.Request) (*http.Response, error) {
+			moved = true
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": upid})
+		})
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/nodes/pve-2/storage/local-lvm/content",
+		func(_ *http.Request) (*http.Response, error) {
+			if moved {
+				return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{{"volid": "local-lvm:" + disk, "size": int64(5 * 1024 * 1024 * 1024)}}})
+			}
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": []map[string]any{}})
+		})
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/tasks/`+upid+`/status`,
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{
+			"data": map[string]any{"upid": upid, "node": "pve-1", "status": "stopped", "exitstatus": "OK"},
+		}))
+
+	// The request is stamped under the LEGACY upstream key only: dual-read
+	// compatibility must still trigger and execute the migration.
+	c, kclient, _ := newTestController(t,
+		newPVC(map[string]string{legacyKey(t, migrator.AnnotationMigrateNode): "pve-2"}),
+		newPV(disk, nil))
+
+	simulateClaimRefBinder(kclient)
+
+	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	require.NotEmpty(t, pvc.Spec.VolumeName)
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), pvc.Spec.VolumeName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, testRegion+"/pve-2/"+testStorage+"/"+disk, pv.Spec.CSI.VolumeHandle)
+
+	// Completion must leave NEITHER variant of the request behind and report
+	// the phase under the canonical key.
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
+	assert.Empty(t, pvc.Annotations[legacyKey(t, migrator.AnnotationMigrateNode)])
+	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
+}
+
+func TestReconcilePVCLegacyAlreadyOnTarget(t *testing.T) {
+	c, _, _ := newTestController(t,
+		newPVC(map[string]string{legacyKey(t, migrator.AnnotationMigrateNode): testZone}),
+		newPV("vm-9999-pvc-exist", nil))
+
+	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
+	require.NoError(t, err)
+
+	// The legacy-stamped request is consumed: both variants are cleared and
+	// the status is written under the canonical key only.
+	pvc := getPVC(t, c)
+	assert.Empty(t, pvc.Annotations[migrator.AnnotationMigrateNode])
+	assert.Empty(t, pvc.Annotations[legacyKey(t, migrator.AnnotationMigrateNode)])
+	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
+	assert.Empty(t, pvc.Annotations[legacyKey(t, migrator.AnnotationMigratePhase)])
+}
+
+func TestReconcileNodeEvacuateLegacy(t *testing.T) {
+	c, kclient, recorder := newTestController(t,
+		newPVC(nil),
+		newPV("vm-9999-pvc-exist", nil),
+		newNode(map[string]string{
+			legacyKey(t, migrator.AnnotationEvacuate):      "pve-2",
+			legacyKey(t, migrator.AnnotationEvacuateForce): "true",
+		}))
+
+	err := c.reconcileNode(context.Background(), "cluster-1-node-1")
+	require.NoError(t, err)
+
+	// The expanded per-PVC request is stamped under the canonical keys.
+	pvc := getPVC(t, c)
+	assert.Equal(t, "pve-2", pvc.Annotations[migrator.AnnotationMigrateNode])
+	assert.Equal(t, "true", pvc.Annotations[migrator.AnnotationMigrateForce])
+
+	// Consuming the node request clears BOTH variants.
+	node, err := kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node-1", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, node.Annotations[migrator.AnnotationEvacuate])
+	assert.Empty(t, node.Annotations[legacyKey(t, migrator.AnnotationEvacuate)])
+	assert.Empty(t, node.Annotations[legacyKey(t, migrator.AnnotationEvacuateForce)])
+
+	event := <-recorder.Events
+	assert.Contains(t, event, "EvacuationRequested")
+}
+
+func TestEnqueueFiltersLegacy(t *testing.T) {
+	c, _, _ := newTestController(t)
+
+	c.enqueuePVC(newPVC(map[string]string{legacyKey(t, migrator.AnnotationMigrateNode): "pve-2"}))
+	assert.Equal(t, 1, c.pvcQueue.Len(), "a legacy-stamped PVC must still be enqueued")
+
+	c.enqueueNode(newNode(map[string]string{legacyKey(t, migrator.AnnotationEvacuate): "auto"}))
+	assert.Equal(t, 1, c.nodeQueue.Len(), "a legacy-stamped node must still be enqueued")
 }

@@ -46,13 +46,30 @@ const (
 
 // constants for node labels
 const (
-	// ProxmoxCCMTopology is the base topology label from Proxmox CCM
+	// ProxmoxTopology is the project's canonical base topology label.
+	ProxmoxTopology = "topology.proxmox.crunchymonkies.com"
+
+	// ProxmoxCCMTopology is the base topology label from the upstream Proxmox
+	// CCM, still read for backward compatibility.
+	//
+	// Deprecated: use ProxmoxTopology. Legacy labels remain accepted on reads.
 	ProxmoxCCMTopology = "topology.proxmox.sinextra.dev"
 
 	// ProxmoxRegion is the Proxmox region (cluster name) label
-	ProxmoxRegion = ProxmoxCCMTopology + "/region"
+	ProxmoxRegion = ProxmoxTopology + "/region"
 	// ProxmoxNode is the Proxmox node name label
-	ProxmoxNode = ProxmoxCCMTopology + "/node"
+	ProxmoxNode = ProxmoxTopology + "/node"
+
+	// ProxmoxRegionLegacy is the upstream variant of ProxmoxRegion, still read
+	// for backward compatibility.
+	//
+	// Deprecated: use ProxmoxRegion.
+	ProxmoxRegionLegacy = ProxmoxCCMTopology + "/region"
+	// ProxmoxNodeLegacy is the upstream variant of ProxmoxNode, still read
+	// for backward compatibility.
+	//
+	// Deprecated: use ProxmoxNode.
+	ProxmoxNodeLegacy = ProxmoxCCMTopology + "/node"
 
 	// NodeLabelMaxVolumeAttachments is the node label for maximum volume attachments
 	NodeLabelMaxVolumeAttachments = DriverName + "/max-volume-attachments"

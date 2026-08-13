@@ -225,3 +225,134 @@ func TestRoundUpSizeBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestProxmoxVMIDbyNodeInstanceIDFallback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		msg           string
+		providerID    string
+		annotations   map[string]string
+		expectedVMID  int
+		expectedError bool
+	}{
+		{
+			msg:          "providerID wins",
+			providerID:   "proxmox://region-1/100",
+			expectedVMID: 100,
+		},
+		{
+			msg:          "canonical instance-id annotation",
+			annotations:  map[string]string{"proxmox.crunchymonkies.com/instance-id": "101"},
+			expectedVMID: 101,
+		},
+		{
+			msg:          "legacy instance-id annotation still read",
+			annotations:  map[string]string{"proxmox.sinextra.dev/instance-id": "102"},
+			expectedVMID: 102,
+		},
+		{
+			msg: "canonical annotation wins over legacy",
+			annotations: map[string]string{
+				"proxmox.crunchymonkies.com/instance-id": "103",
+				"proxmox.sinextra.dev/instance-id":       "999",
+			},
+			expectedVMID: 103,
+		},
+		{
+			msg:           "no providerID and no annotation",
+			expectedError: true,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.msg, func(t *testing.T) {
+			t.Parallel()
+
+			node := &corev1.Node{}
+			node.Spec.ProviderID = testCase.providerID
+			node.Annotations = testCase.annotations
+
+			vmID, err := ProxmoxVMIDbyNode(node)
+			if testCase.expectedError {
+				assert.NotNil(t, err)
+			} else {
+				assert.Nil(t, err)
+				assert.Equal(t, testCase.expectedVMID, vmID)
+			}
+		})
+	}
+}
+
+func TestGetNodeTopologyFallback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		msg            string
+		labels         map[string]string
+		expectedRegion string
+		expectedZone   string
+	}{
+		{
+			msg: "canonical proxmox topology labels",
+			labels: map[string]string{
+				"topology.proxmox.crunchymonkies.com/region": "region-1",
+				"topology.proxmox.crunchymonkies.com/node":   "pve-1",
+			},
+			expectedRegion: "region-1",
+			expectedZone:   "pve-1",
+		},
+		{
+			msg: "legacy proxmox topology labels still read",
+			labels: map[string]string{
+				"topology.proxmox.sinextra.dev/region": "region-1",
+				"topology.proxmox.sinextra.dev/node":   "pve-1",
+			},
+			expectedRegion: "region-1",
+			expectedZone:   "pve-1",
+		},
+		{
+			msg: "canonical labels win over legacy and kubernetes.io",
+			labels: map[string]string{
+				"topology.proxmox.crunchymonkies.com/region": "region-1",
+				"topology.proxmox.crunchymonkies.com/node":   "pve-1",
+				"topology.proxmox.sinextra.dev/region":       "legacy-region",
+				"topology.proxmox.sinextra.dev/node":         "legacy-node",
+				corev1.LabelTopologyRegion:                   "k8s-region",
+				corev1.LabelTopologyZone:                     "k8s-zone",
+			},
+			expectedRegion: "region-1",
+			expectedZone:   "pve-1",
+		},
+		{
+			msg: "legacy labels win over kubernetes.io",
+			labels: map[string]string{
+				"topology.proxmox.sinextra.dev/region": "legacy-region",
+				"topology.proxmox.sinextra.dev/node":   "legacy-node",
+				corev1.LabelTopologyRegion:             "k8s-region",
+				corev1.LabelTopologyZone:               "k8s-zone",
+			},
+			expectedRegion: "legacy-region",
+			expectedZone:   "legacy-node",
+		},
+		{
+			msg: "kubernetes.io labels as last resort",
+			labels: map[string]string{
+				corev1.LabelTopologyRegion: "k8s-region",
+				corev1.LabelTopologyZone:   "k8s-zone",
+			},
+			expectedRegion: "k8s-region",
+			expectedZone:   "k8s-zone",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.msg, func(t *testing.T) {
+			t.Parallel()
+
+			region, zone := GetNodeTopology(testCase.labels)
+			assert.Equal(t, testCase.expectedRegion, region)
+			assert.Equal(t, testCase.expectedZone, zone)
+		})
+	}
+}
