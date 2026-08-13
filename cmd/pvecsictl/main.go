@@ -130,6 +130,7 @@ func run() int {
 	cmd.AddCommand(buildMigrateCmd())
 	cmd.AddCommand(buildRenameCmd())
 	cmd.AddCommand(buildSwapCmd())
+	cmd.AddCommand(buildCleanCmd())
 	cmd.AddCommand(buildControllerCmd())
 	cmd.AddCommand(buildEvacuateCmd())
 	cmd.AddCommand(buildRebalanceCmd())
