@@ -40,8 +40,14 @@ between them per cluster (see [Using it](#using-it) below).
 
 ## Using it
 
-Build and install on each Proxmox node (needs [proxmod](https://github.com/CrunchyMonkies/proxmod)
-installed first — this package `Depends:` on it):
+Install on each Proxmox node (needs [proxmod](https://github.com/CrunchyMonkies/proxmod)
+installed first — this package `Depends:` on it). A prebuilt
+`proxmox-csi-storage_<ver>_all.deb` is attached to every
+[fork release](https://github.com/CrunchyMonkies/proxmox-csi-plugin/releases);
+its version tracks `debian/changelog`, not the driver version, so the same deb
+usually spans several driver releases.
+
+To build it yourself instead:
 
 ```sh
 make -C hack/proxmod-csi-storage build          # syntax check

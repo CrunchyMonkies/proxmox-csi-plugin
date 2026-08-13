@@ -75,13 +75,36 @@ jobs:
         env:
           TAG: ${{ env.RELEASE_TAG }}
 
+      # The proxmod extension ships as a node-side .deb, so it rides along on
+      # the release rather than the image. Its version comes from
+      # hack/proxmod-csi-storage/debian/changelog and is deliberately
+      # independent of the fork version — the endpoint's wire contract moves
+      # much more slowly than the driver does.
+      - name: Install deb build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential debhelper dpkg-dev perl
+
+      - name: Build proxmod-csi-storage deb
+        working-directory: hack/proxmod-csi-storage
+        run: dpkg-buildpackage -b -us -uc
+
+      - name: Collect deb
+        run: |
+          # dpkg-buildpackage writes to the PARENT of the source dir.
+          mkdir -p dist
+          mv hack/proxmox-csi-storage_*.deb dist/
+          ls -l dist
+          dpkg-deb -c dist/*.deb
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARGS=(--target "$GITHUB_SHA" --title "$RELEASE_TAG" --generate-notes)
           [[ "$GITHUB_REF_NAME" == *-* ]] && ARGS+=(--prerelease)
-          gh release create "$RELEASE_TAG" "${ARGS[@]}"
+          gh release create "$RELEASE_TAG" dist/*.deb "${ARGS[@]}"
 
   build-publish-cli:
     name: "Publish cli tool"
