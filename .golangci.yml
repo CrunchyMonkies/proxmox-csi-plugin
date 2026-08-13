@@ -57,12 +57,10 @@ linters:
     - gomodguard
 
     # temporarily disabled linters
-    - copyloopvar
     - intrange
     - noinlineerr
     - noctx
     - modernize
-    - goconst
   settings:
     wsl_v5:
       allow-first-in-block: true
@@ -88,7 +86,7 @@ linters:
       min-complexity: 30
     gomoddirectives:
       replace-local: true
-      replace-allow-list: [ github.com/luthermonson/go-proxmox ]
+      replace-allow-list: [github.com/luthermonson/go-proxmox]
       retract-allow-no-explanation: false
       exclude-forbidden: true
     lll:
@@ -124,6 +122,24 @@ linters:
       - path: _test\.go
         linters:
           - dupl
+          - goconst
+      - path: test/cluster/
+        linters:
+          - dupl
+          - goconst
+      # Fork-only code whose repeated literals are data, not magic values:
+      # Proxmox API request-parameter names (pkg/tools/proxmox), the RBAC
+      # preflight tables in the pvecsictl subcommands, and the "true"/"false"/
+      # "auto" annotation values the migration controller matches on. Naming
+      # any of them costs the reader the ability to grep the wire name.
+      - path: pkg/tools/proxmox/
+        linters:
+          - goconst
+      - path: pkg/controller/migration/controller\.go
+        linters:
+          - goconst
+      - path: cmd/pvecsictl/(controller|evacuate|rebalance)\.go
+        linters:
           - goconst
     paths:
       - pkg/helpers/ptr/ptr.go

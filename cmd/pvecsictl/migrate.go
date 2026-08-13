@@ -103,7 +103,7 @@ func (c *migrateCmd) runMigration(cmd *cobra.Command, args []string) error {
 	return err
 }
 
-// nolint: dupl
+// nolint: dupl,goconst
 func (c *migrateCmd) migrationValidate(cmd *cobra.Command, _ []string) error {
 	flags := cmd.Flags()
 
