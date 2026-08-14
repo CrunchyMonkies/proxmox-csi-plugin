@@ -263,7 +263,10 @@ func MoveQemuDisk(
 // has succeeded: deleting an `unused<n>` whose volume still exists makes PVE
 // deallocate it for real.
 //
-// Requires the proxmox-csi-storage package (>= 0.3.0) and proxmod on the node.
+// Requires the proxmox-csi-storage package (>= 0.3.1) and proxmod on the node.
+// 0.3.0 will not do: its endpoint does not proxy to the node in the path, so it
+// answers about the host the cluster URL points at and reports every volume
+// elsewhere as not found.
 func RenameVolume(ctx context.Context, cluster *goproxmox.APIClient, vol *volume.Volume, targetVMID int) (*volume.Volume, error) {
 	target := vol.WithVMID(targetVMID)
 	if target == nil {

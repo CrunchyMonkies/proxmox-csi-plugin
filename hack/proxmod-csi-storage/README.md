@@ -105,6 +105,14 @@ Synchronous — a rename is an in-directory `rename(2)` on dir/LVM/ZFS, so there
 is no worker to fork and no UPID to poll. It returns the volume's new volid as a
 plain string.
 
+`$HOST` and `$NODE` need not be the same machine. Both volume endpoints declare
+`proxyto => 'node'`, so PVE forwards the request to the node named in the path
+and the answer is always about that node's storage — which is what makes one
+cluster URL enough for a whole fleet. **0.3.0 lacked the flag** and answered
+about whichever host received the request instead, silently, so upgrade before
+relying on either endpoint from a client that talks to one address. `t/proxyto.t`
+asserts it stays set.
+
 `target_volname` is the **bare filename**, never the `<vmid>/<name>` form the
 `volume` parameter accepts: `PVE::Storage::Plugin::rename_volume` composes the
 destination itself as `<basedir>/<target_vmid>/<target_volname>`, so a slash

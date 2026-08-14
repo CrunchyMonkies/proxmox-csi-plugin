@@ -24,11 +24,14 @@ all: build
 build: test
 	perl -c -Iperl -It/lib perl/ProxmodExt/CSIStorage.pm
 
-# The volname allow-list is the endpoint's only traversal guard, and the only
-# thing making directory-storage copies possible. It reads the pattern out of
-# the module source, so it needs no PVE and no stubs.
+# Both tests read what they assert out of the module source, so they need no
+# PVE and no stubs: the volname allow-list, which is the endpoint's only
+# traversal guard and the only thing making directory-storage copies possible,
+# and the proxyto flags, without which a method silently answers about whichever
+# host received the request rather than the node named in its path.
 test:
 	perl t/volname.t
+	perl t/proxyto.t
 
 install:
 	$(INSTALL) -d $(DESTDIR)$(PERLDIR)/ProxmodExt
