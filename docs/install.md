@@ -262,8 +262,11 @@ it is attached to (`local:3021/vm-3021-pvc-<uuid>.raw`) for as long as a pod is 
 back to the placeholder on detach. The PV's `volumeHandle` is never rewritten.
 
 It requires [proxmod](https://github.com/CrunchyMonkies/proxmod) and the
-[`proxmox-csi-storage`](../hack/proxmod-csi-storage/) extension **>= 0.3.0** on **every** Proxmox
-node — the rename has no REST endpoint of its own in PVE. Build and install steps are in
+[`proxmox-csi-storage`](../hack/proxmod-csi-storage/) extension **>= 0.3.1** on **every** Proxmox
+node — the rename has no REST endpoint of its own in PVE. 0.3.0 will not do: its endpoints answer
+about whichever host the cluster `url` points at rather than the node named in the request, so the
+feature is inert for volumes on every other node
+([troubleshooting](reassign-volume-on-attach.md#troubleshooting)). Build and install steps are in
 [hack/proxmod-csi-storage/README.md](../hack/proxmod-csi-storage/README.md), and a rollback-tested
 install procedure in [SMOKE-TEST.md](../hack/proxmod-csi-storage/SMOKE-TEST.md). Installing proxmod
 rewrites the `pvedaemon`/`pveproxy` unit and restarts both, so expect a brief API interruption on

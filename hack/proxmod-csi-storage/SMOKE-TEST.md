@@ -2,8 +2,9 @@
 
 Verifies that the `csi-storage` extension registers, that its endpoints answer,
 that their ACL gates actually gate, and that `rename` refuses a volume some VM
-is still using — end to end on a real Proxmox node, using only scratch volumes
-and one scratch VM.
+is still using, and that both answer about the node named in the path rather than
+the one that received the request — end to end on real Proxmox nodes, using only
+scratch volumes and one scratch VM.
 
 **This procedure has not been run.** It is written down so the install is a
 reviewed, deliberate step rather than an improvised one. Read
@@ -36,6 +37,11 @@ Pick a node deliberately. Doing this on the node the CSI cluster URL points at
 tests the realistic path but takes the widest outage; doing it on a non-endpoint
 node is safer but does not exercise the client.
 
+This costs the same interruption on **two** nodes, not one: step 8 sends a
+request to one node about another, and that is the only step that would have
+caught the missing `proxyto` in 0.3.0. Restarting them one at a time keeps the
+cluster API answering throughout.
+
 ## Prerequisites
 
 Both packages, built locally (see [README.md](README.md) and proxmod's own
@@ -45,6 +51,11 @@ Both packages, built locally (see [README.md](README.md) and proxmod's own
 * `proxmox-csi-storage_<version>_all.deb`
 
 Pick a **target node** (`$NODE`) and note its API address (`$HOST`).
+
+Pick a **second node** (`$OTHER`) on the same cluster and note its API address
+(`$OTHER_HOST`). Steps 1-7 only use `$NODE`; step 8 sends a request to
+`$OTHER_HOST` *about* `$NODE`, which is the shape every request from the CSI
+driver actually has and the one a single-node run cannot exercise.
 
 ## 1. Install
 
@@ -254,7 +265,66 @@ ssh root@$HOST 'pveum acl delete /vms/9991 --roles CSIRenameVM --tokens "csi-smo
 
 Re-issue the rename (target `9992`, or back to `9990`). **Expect HTTP 403.**
 
-## 8. Cleanup
+## 8. Cross-node test: the same rename, asked of a different node
+
+**Do not skip this, and do not substitute `$HOST` for `$OTHER_HOST` to make it
+convenient.** Every step so far sent its request to `$NODE`'s own API address, so
+the handler would have run on the right machine whether or not it was ever asked
+to. That is precisely how 0.3.0 shipped without `proxyto => 'node'` and passed
+this document: the `{node}` segment was decorative, the method ran on whichever
+host received the request, and with node-local storage every volume on every
+other node was invisible to it. The CSI driver has one API address per cluster
+and names a different node in almost every request, so it hit that on every node
+but one — for a week, silently, because the driver treats a failed rename as
+non-fatal.
+
+Install both packages on `$OTHER` as well (proxying forwards to `$OTHER`'s
+pvedaemon only if it has the module, and `$OTHER`'s pveproxy must resolve the
+method in its own tree before it will proxy at all):
+
+```sh
+scp proxmod_*_all.deb proxmox-csi-storage_*_all.deb root@$OTHER_HOST:/tmp/
+ssh root@$OTHER_HOST 'apt install -y /tmp/proxmod_*_all.deb /tmp/proxmox-csi-storage_*_all.deb'
+```
+
+Restore the target-VM ACL step 7 deleted, and allocate a fresh scratch volume on
+`$NODE` (the step 7 one is now named for 9991):
+
+```sh
+ssh root@$HOST '
+  pveum acl modify /vms/9991 --roles CSIRenameVM --tokens "csi-smoke@pve!smoke"
+  pvesm alloc local 9990 "" 1G
+'
+```
+
+Now issue step 7's request again — same `$NODE` in the path, same storage, same
+volume — but address it to `$OTHER_HOST`:
+
+```sh
+curl -sk -X POST -H "Authorization: PVEAPIToken=$TOKENID=$SECRET" \
+  --data-urlencode "storage=local" \
+  --data-urlencode "volume=9990/vm-9990-disk-0.raw" \
+  --data-urlencode "target_vmid=9991" \
+  --data-urlencode "target_volname=vm-9991-disk-1.raw" \
+  "https://$OTHER_HOST:8006/api2/json/nodes/$NODE/proxmod/csi-storage/rename"
+# expect: {"data":"local:9991/vm-9991-disk-1.raw"}   — same as step 7
+```
+
+```sh
+ssh root@$HOST  'pvesm list local | grep 9991'   # the volume moved, on $NODE
+ssh root@$OTHER_HOST 'pvesm list local | grep 999' # nothing: $OTHER was untouched
+```
+
+The failure this catches is
+`500 source volume 'local:9990/vm-9990-disk-0.raw' not found` — the volume
+plainly exists on `$NODE`, but the handler looked for it on `$OTHER`. Any answer
+that describes `$OTHER`'s storage rather than `$NODE`'s means the method is
+missing `proxyto`; see `t/proxyto.t`.
+
+Do the same for `copy` if the fleet uses it (the migrator does): repeat step 4's
+request against `https://$OTHER_HOST:...`, keeping `target_node=$NODE`.
+
+## 9. Cleanup
 
 Free the volume **before** destroying the scratch VM: after step 7 the volume is
 genuinely owned by 9991, so `qm destroy` would deallocate it — correct
@@ -263,6 +333,7 @@ behaviour, but it makes the "no orphan left" check vacuous.
 ```sh
 ssh root@$HOST '
   pvesm free local:9991/vm-9991-disk-0.raw       || true
+  pvesm free local:9991/vm-9991-disk-1.raw       || true
   pvesm free local:9990/vm-9990-disk-0.raw       || true
   pvesm free datastore1:9990/vm-9990-disk-0.raw  || true
   qm destroy 9991                                || true
@@ -280,10 +351,16 @@ ssh root@$HOST '
   proxmod-verify
   systemctl status pvedaemon pveproxy --no-pager
 '
+
+ssh root@$OTHER_HOST '
+  apt remove -y proxmod proxmox-csi-storage
+  proxmod-verify
+  systemctl status pvedaemon pveproxy --no-pager
+'
 ```
 
 The final `proxmod-verify` and `systemctl status` confirm the stock units came
-back — that the node is exactly as it was before step 1.
+back — that **both** nodes are exactly as they were before step 1.
 
 ## What this does not test
 

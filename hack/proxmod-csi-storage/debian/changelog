@@ -1,3 +1,22 @@
+proxmox-csi-storage (0.3.1) unstable; urgency=medium
+
+  * Set `proxyto => 'node'` on `copy` and `rename`. Without it PVE never
+    forwards the request to the node named in the path, so both methods ran on
+    whichever host received it — for proxmox-csi-plugin, always the single host
+    its cluster URL points at. With node-local storage that made every volume on
+    every other node invisible: `rename` failed with
+    "500 source volume 'local:9999/vm-9999-pvc-<uuid>.raw' not found" for
+    volumes that plainly existed, seconds after they were created, and
+    `features.reassignVolumeOnAttach` was silently inert everywhere except that
+    one host. Attaches were unaffected — the driver treats a failed rename as
+    non-fatal — and no volume needs repairing: each is renamed correctly on its
+    next attach.
+  * `copy`'s `target_node` now defaults to the request node, as its description
+    always claimed. It previously defaulted to whichever host answered. No
+    caller was affected; proxmox-csi-plugin always sends it explicitly.
+
+ -- CrunchyMonkies <opensource@crunchymonkies.invalid>  Fri, 14 Aug 2026 00:00:00 +0000
+
 proxmox-csi-storage (0.3.0) unstable; urgency=medium
 
   * Add a `rename` endpoint, wrapping PVE::Storage::rename_volume. It is the

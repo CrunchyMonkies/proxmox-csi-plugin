@@ -7,10 +7,15 @@ volume is `local:3021/vm-3021-pvc-<uuid>.raw` rather than
 the controller's placeholder VM ID (`controllerVMID`, default `9999`).
 
 It requires the [`proxmox-csi-storage` proxmod extension](../hack/proxmod-csi-storage/)
-(>= 0.3.0) installed on every PVE node, and `proxmod_endpoint: true` on the cluster.
+(**>= 0.3.1**) installed on every PVE node, and `proxmod_endpoint: true` on the cluster.
 Without it the rename fails, the attach proceeds under the volume's existing name, and
 the feature is a no-op — the controller logs a warning at startup if the flag is set
 while no cluster enables the endpoint.
+
+0.3.0 is not sufficient: its rename endpoint runs on whichever host the driver's
+cluster URL points at rather than the node named in the request, so the feature works
+only for volumes that happen to live on that one host. See
+[Troubleshooting](#troubleshooting).
 
 ## Why this exists
 
@@ -97,8 +102,8 @@ clusters:
     proxmod_endpoint: true
 ```
 
-Install the extension on **every** PVE node first — a node without it silently falls
-back to no-op renames for volumes on that node. See
+Install the extension (>= 0.3.1) on **every** PVE node first — a node without it
+silently falls back to no-op renames for volumes on that node. See
 [`hack/proxmod-csi-storage/README.md`](../hack/proxmod-csi-storage/README.md) for
 packaging and [`SMOKE-TEST.md`](../hack/proxmod-csi-storage/SMOKE-TEST.md) for
 verifying the endpoint before any CSI driver is pointed at it.
@@ -159,6 +164,37 @@ safe independent of driver bugs. Verify it fires (attempt a rename of an attache
 volume; expect a refusal, not a rename) before trusting anything else about the
 install.
 
+## Troubleshooting
+
+### `source volume ... not found` for a volume that exists
+
+```
+ControllerPublishVolume: failed to rename volume, attaching under its current name
+  error="500 source volume 'local:9999/vm-9999-pvc-<uuid>.raw' not found"
+```
+
+Extension 0.3.0 registered `rename` and `copy` without PVE's `proxyto => 'node'`, so
+the `{node}` segment in the request path was decorative: the handler ran on whichever
+host received the HTTP request, which for this driver is always the single address the
+cluster's `url` points at. `local` is node-local storage, so every volume on any other
+node was invisible to it and the rename failed — even for a volume created seconds
+earlier. **Upgrade every node to >= 0.3.1.**
+
+Recognizing it:
+
+- The failures partition perfectly by node. Renames succeed for volumes on the host in
+  the cluster `url` and fail for volumes everywhere else, with no other pattern.
+- Nothing else breaks. The rename is non-fatal, so pods attach and run normally; the
+  feature is simply inert on every node but one.
+- The message comes from the extension itself, so the package *is* installed and the
+  endpoint *is* reachable. It is answering about the wrong machine, not failing to
+  answer.
+
+Nothing needs repairing afterwards. A failed rename leaves the volume under its
+placeholder name, which is exactly what the PV's `volumeHandle` says, so each volume
+renames correctly on its next attach once the nodes are upgraded. The same defect
+affects `copy`, and would fail cross-node migration the same way.
+
 ## Live verification of the rename design (2026-08-12)
 
 Same cluster as below (12 nodes, 67 CSI PVs, PVE 8, `local` directory storage, `raw`),
@@ -175,6 +211,12 @@ worker.
 | Controller killed mid-attach — `resolveVolume` adopts on retry | pass |
 | PVC deleted — volume gone from storage, no orphan, VM config clean | pass |
 | The other 66 CSI volumes unmoved | pass |
+
+This run predates the 0.3.1 fix, and every check above passed only because the scratch
+PVC's volume sat on the host the cluster `url` points at. Repeat it against a volume on
+a different node before trusting the result on a fleet — that is the case the missing
+`proxyto` broke, and this table did not cover it. See
+[Troubleshooting](#troubleshooting).
 
 ## Live test result (2026-08-12)
 
@@ -265,7 +307,10 @@ RPC must resolve the volume's current name rather than rebuild it from the handl
       — and the pod reads and writes its mount anyway. **Handle validity is the point.**
 - [ ] Delete the pod. The volume returns to `<storage>:9999/vm-9999-pvc-<uuid>.raw`,
       and no `unused<n>` key is left in the VM config.
-- [ ] Reschedule to a **different** node; the rename follows to the new vmid.
+- [ ] Reschedule to a **different** node — specifically one that is *not* the host the
+      cluster's `url` points at — and confirm the rename follows to the new vmid. A
+      rename that works only on the API host is the 0.3.0 failure described in
+      [Troubleshooting](#troubleshooting), and nothing else in this list detects it.
 - [ ] `ControllerExpandVolume` and `ControllerModifyVolume` succeed **while attached**,
       i.e. against a stale handle — the paths suffix matching exists to protect.
 - [ ] Delete the PVC; the volume is gone from `pvesm list`, with no orphan.

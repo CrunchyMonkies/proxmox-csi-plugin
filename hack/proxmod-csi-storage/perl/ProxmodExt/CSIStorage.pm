@@ -53,7 +53,7 @@ use base qw(PVE::RESTHandler);
 # rename_volume performs NO in-use check of its own (unlike vdisk_free), so the
 # `rename` method below supplies one; see _find_blocking_references.
 
-our $VERSION = '0.3.0';
+our $VERSION = '0.3.1';
 
 # Anti-traversal allow-list for volnames, applied to both the source `volume`
 # parameter and the target volname parsed out of `target`.
@@ -128,6 +128,16 @@ sub _register_copy {
         path => 'copy',
         method => 'POST',
         protected => 1,
+        # Both volume methods answer about the LOCAL machine's storage, so they
+        # must run on the node named in the path. PVE only proxies a request to
+        # that node when the method asks for it; without this the {node} segment
+        # is decorative and the handler executes wherever the request happened to
+        # land — for the CSI driver, always the single host its cluster URL points
+        # at. With node-local storage every volume on any other node is then
+        # invisible, and the method fails with "source volume ... not found" for a
+        # volume that plainly exists. PVECSICopy::Impl, which `copy` is a port of,
+        # sets this; the port dropped it.
+        proxyto => 'node',
         permissions => {
             description => 'Datastore.Audit on the SOURCE storage (a copy is a read); '
                 . 'the specific source volume is additionally checked with '
@@ -234,6 +244,10 @@ sub _register_rename {
         path => 'rename',
         method => 'POST',
         protected => 1,
+        # Without this the {node} segment is decorative: the method runs on
+        # whichever host received the request, not the one named in the path.
+        # See _register_copy.
+        proxyto => 'node',
         permissions => {
             description => 'Datastore.Audit on the storage; the specific source volume '
                 . 'is additionally checked with check_volume_access, '
