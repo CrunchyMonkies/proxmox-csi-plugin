@@ -73,7 +73,21 @@ var (
 	// wait-until-visible check can observe what it just wrote.
 	attachRequests []AttachRequest
 	vm100Attached  map[string]string
+	// renameFailure, when non-empty, makes the rename endpoint answer with it
+	// instead of renaming. See FailRenames.
+	renameFailure string
 )
+
+// FailRenames makes the proxmod rename endpoint refuse every call with a 500
+// carrying the given message, which is how a node running an extension that
+// cannot see the volume answers. Pass "" to restore the successful behavior.
+// Reset by SetupMockResponders.
+func FailRenames(message string) {
+	mockMu.Lock()
+	defer mockMu.Unlock()
+
+	renameFailure = message
+}
 
 // AttachRequests returns the drives the driver has attached to VM 100 since the
 // last SetupMockResponders, in the order it asked for them.
@@ -111,6 +125,7 @@ func SetupMockResponders() {
 	vm101Unlinked = false
 	attachRequests = nil
 	vm100Attached = map[string]string{}
+	renameFailure = ""
 	mockMu.Unlock()
 
 	httpmock.RegisterResponder(http.MethodGet, `=~/version$`,
@@ -649,7 +664,22 @@ func SetupMockResponders() {
 				TargetVMID:    params.TargetVMID,
 				TargetVolname: params.TargetVolname,
 			})
+			failure := renameFailure
 			mockMu.Unlock()
+
+			if failure != "" {
+				// PVE reports an endpoint's die() in the HTTP status line, which is
+				// where the client reads it from — hence the overwrite rather than an
+				// error body.
+				resp, err := httpmock.NewJsonResponse(500, map[string]any{"data": nil})
+				if err != nil {
+					return nil, err
+				}
+
+				resp.Status = fmt.Sprintf("500 %s", failure)
+
+				return resp, nil
+			}
 
 			return httpmock.NewJsonResponse(200,
 				map[string]any{"data": fmt.Sprintf("%s:%s", params.Storage, params.TargetVolname)})

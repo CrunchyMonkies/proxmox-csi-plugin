@@ -61,6 +61,21 @@ refuses, the error is logged and the volume attaches under its existing name. Th
 lesson from the 2026-08-12 live test is that this feature must not be able to take
 attach down cluster-wide.
 
+Because nothing else about the attach changes, the failure is also recorded as a
+Warning event on the volume's claim, carrying the Proxmox error verbatim:
+
+```
+kubectl describe pvc <name>
+  Warning  ReassignVolumeFailed  proxmox-csi-controller  Failed to reassign …
+```
+
+`ReassignVolumeFailed` on the attach, `ReassignVolumeBackFailed` on the detach.
+Alert on either: a rename that quietly stops working leaves the feature inert
+with no other symptom, and before these events the only trace was a single
+controller log line — which is how a whole-fleet breakage once ran for a week
+unnoticed. Emitting the event is itself best effort; a volume whose claim cannot
+be read is logged and nothing more.
+
 ## Two consequences worth knowing before you enable it
 
 **1. While attached, the VM genuinely owns the volume.** `qm destroy 3021` will

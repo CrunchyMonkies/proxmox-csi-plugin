@@ -40,6 +40,7 @@ import (
 	clientkubernetes "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/record"
 )
 
 var _ proto.ControllerServer = (*csi.ControllerService)(nil)
@@ -176,6 +177,30 @@ func (ts *baseCSITestSuite) setupTestSuite(config string) error {
 					},
 				},
 			},
+			{
+				// The volume the unpublish tests detach from VM 101. Bound to a claim
+				// so a failed rename back has somewhere to report itself; it names no
+				// VolumeAttributesClass, so nothing else about it changes.
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "PersistentVolume",
+					APIVersion: "v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pvc-reassigned",
+				},
+				Spec: corev1.PersistentVolumeSpec{
+					PersistentVolumeSource: corev1.PersistentVolumeSource{
+						CSI: &corev1.CSIPersistentVolumeSource{
+							Driver:       csi.DriverName,
+							VolumeHandle: "cluster-1/pve-2/local-lvm/vm-9999-pvc-reassigned",
+						},
+					},
+					ClaimRef: &corev1.ObjectReference{
+						Namespace: "default",
+						Name:      "reassigned-claim",
+					},
+				},
+			},
 		},
 	}
 
@@ -194,6 +219,20 @@ func (ts *baseCSITestSuite) setupTestSuite(config string) error {
 		},
 	}
 
+	pvcReassigned := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "PersistentVolumeClaim",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "reassigned-claim",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName: "pvc-reassigned",
+		},
+	}
+
 	vac := &storagev1.VolumeAttributesClass{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "VolumeAttributesClass",
@@ -209,7 +248,7 @@ func (ts *baseCSITestSuite) setupTestSuite(config string) error {
 		},
 	}
 
-	kclient := fake.NewClientset(nodes, pv, pvc, vac)
+	kclient := fake.NewClientset(nodes, pv, pvc, pvcReassigned, vac)
 
 	px, err := csi.NewControllerService(kclient, config, "default")
 	if err != nil {
@@ -858,6 +897,116 @@ func (ts *configuredTestSuite) TestControllerPublishVolumeSurvivesVolumeAttribut
 	ts.Require().NotContains(options, "mbps_rd")
 }
 
+// TestControllerPublishVolumeEventsFailedReassignment: a rename that fails is
+// deliberately non-fatal, so the attach it happens under reports success and the
+// volume works — which is exactly why it needs to say so somewhere an operator
+// looks. A live fleet ran for a week with this rename failing on three nodes out
+// of four and the only trace was one controller log line.
+func (ts *configuredTestSuite) TestControllerPublishVolumeEventsFailedReassignment() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.FailRenames("source volume 'local-lvm:9999/vm-9999-pvc-unpublished' not found")
+
+	events := ts.recordEvents()
+
+	resp, err := ts.publishVolume()
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+	ts.Require().Len(testcluster.AttachRequests(), 1)
+
+	if !ts.configCase.reassign {
+		// Nothing was renamed, so there is nothing to report.
+		ts.Require().Empty(testcluster.RenameRequests())
+		ts.Require().Empty(events())
+
+		return
+	}
+
+	ts.Require().Len(testcluster.RenameRequests(), 1)
+
+	reasons := events()
+	ts.Require().Len(reasons, 1)
+	ts.Require().Contains(reasons[0], corev1.EventTypeWarning)
+	ts.Require().Contains(reasons[0], "ReassignVolumeFailed")
+	ts.Require().Contains(reasons[0], "not found")
+}
+
+// TestControllerPublishVolumeSilentOnSuccessfulReassignment: the event is a
+// failure signal, so a working cluster must not accumulate one per attach.
+func (ts *configuredTestSuite) TestControllerPublishVolumeSilentOnSuccessfulReassignment() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	events := ts.recordEvents()
+
+	resp, err := ts.publishVolume()
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+
+	if ts.configCase.reassign {
+		ts.Require().Len(testcluster.RenameRequests(), 1)
+	}
+
+	ts.Require().Empty(events())
+}
+
+// TestControllerUnpublishVolumeEventsFailedRenameBack: a volume left on the
+// target VM's name is still resolved by suffix and adopted on its next attach,
+// so the detach succeeds — but until then the PV's volumeHandle names something
+// that is not there, which is worth surfacing under its own reason.
+func (ts *configuredTestSuite) TestControllerUnpublishVolumeEventsFailedRenameBack() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.FailRenames("source volume 'local-lvm:101/vm-101-pvc-reassigned' not found")
+
+	events := ts.recordEvents()
+
+	_, err := ts.s.ControllerUnpublishVolume(context.Background(), &proto.ControllerUnpublishVolumeRequest{
+		NodeId:   "cluster-1-node-2",
+		VolumeId: "cluster-1/pve-2/local-lvm/vm-9999-pvc-reassigned",
+	})
+	ts.Require().NoError(err)
+
+	if !ts.configCase.reassign {
+		ts.Require().Empty(testcluster.RenameRequests())
+		ts.Require().Empty(events())
+
+		return
+	}
+
+	ts.Require().Len(testcluster.RenameRequests(), 1)
+
+	reasons := events()
+	ts.Require().Len(reasons, 1)
+	ts.Require().Contains(reasons[0], corev1.EventTypeWarning)
+	ts.Require().Contains(reasons[0], "ReassignVolumeBackFailed")
+}
+
+// TestControllerPublishVolumeSurvivesUnreportableFailure: emitting the event
+// must be as incapable of failing the attach as the rename it reports. A volume
+// whose claim cannot be read has nothing to attach the event to.
+func (ts *configuredTestSuite) TestControllerPublishVolumeSurvivesUnreportableFailure() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.FailRenames("source volume not found")
+
+	ts.kclient.PrependReactor("get", "persistentvolumeclaims",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("apiserver is unavailable")
+		})
+
+	events := ts.recordEvents()
+
+	resp, err := ts.publishVolume()
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+	ts.Require().Len(testcluster.AttachRequests(), 1)
+	ts.Require().Empty(events())
+}
+
 // TestControllerModifyVolumeUnpublished: a detached volume has no VM config
 // entry to carry a throttle, so there is nothing to write and nothing to wait
 // for — ControllerPublishVolume applies the class when the volume next attaches.
@@ -1396,4 +1545,41 @@ func (ts *configuredTestSuite) TestControllerGetVolume() {
 	_, err := ts.s.ControllerGetVolume(context.Background(), &proto.ControllerGetVolumeRequest{})
 	ts.Require().Error(err)
 	ts.Require().Equal(status.Error(codes.Unimplemented, ""), err)
+}
+
+// publishVolume attaches the claim-bound scratch volume to VM 100, which is the
+// attach the reassignment rename runs under on the configs that enable it.
+func (ts *configuredTestSuite) publishVolume() (*proto.ControllerPublishVolumeResponse, error) {
+	return ts.s.ControllerPublishVolume(context.Background(), &proto.ControllerPublishVolumeRequest{
+		NodeId:   "cluster-1-node-1",
+		VolumeId: "cluster-1/pve-1/local-lvm/vm-9999-pvc-unpublished",
+		VolumeCapability: &proto.VolumeCapability{
+			AccessMode: &proto.VolumeCapability_AccessMode{
+				Mode: proto.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+			AccessType: &proto.VolumeCapability_Mount{
+				Mount: &proto.VolumeCapability_MountVolume{FsType: "ext4"},
+			},
+		},
+		VolumeContext: map[string]string{csi.StorageIDKey: "local-lvm"},
+	})
+}
+
+// recordEvents swaps in a recorder a test can read, and returns the reasons of
+// everything emitted through it. Nothing here blocks: the fake drops events once
+// its buffer fills rather than waiting for a reader.
+func (ts *configuredTestSuite) recordEvents() func() []string {
+	recorder := record.NewFakeRecorder(16)
+	ts.s.Recorder = recorder
+
+	return func() []string {
+		close(recorder.Events)
+
+		reasons := []string{}
+		for event := range recorder.Events {
+			reasons = append(reasons, event)
+		}
+
+		return reasons
+	}
 }
