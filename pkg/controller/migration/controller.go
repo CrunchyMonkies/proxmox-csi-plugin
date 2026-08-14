@@ -22,7 +22,6 @@ package migration
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -1086,14 +1085,30 @@ func (c *Controller) failPVC(ctx context.Context, namespace, name, message strin
 }
 
 // patchPVCAnnotations merge-patches annotations on a PVC; nil values delete
-// keys. The legacy variant of every touched key is deleted as well.
+// keys. Every legacy-stamped key the PVC still carries is migrated onto the
+// canonical namespace in the same patch, so any write to a PVC also finishes
+// its move off the legacy annotation namespace.
+//
+// The legacy keys come from a fresh Get, never from the caller's copy: the
+// rewire deletes and recreates the PVC without the migration annotations, so
+// normalizing from a copy read before it would write the consumed request back
+// onto the new object and re-trigger the migration in a loop.
 func (c *Controller) patchPVCAnnotations(ctx context.Context, namespace, name string, annotations map[string]*string) error {
-	patch, err := annotationsPatch(withLegacyCleared(annotations))
+	client := c.kclient.CoreV1().PersistentVolumeClaims(namespace)
+
+	current, err := client.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	patch, err := migrator.AnnotationsPatch(migrator.NormalizeLegacy(current.Annotations, annotations))
 	if err != nil {
 		return err
 	}
 
-	_, err = c.kclient.CoreV1().PersistentVolumeClaims(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+	_, err = client.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -1102,52 +1117,30 @@ func (c *Controller) patchPVCAnnotations(ctx context.Context, namespace, name st
 }
 
 // patchNodeAnnotations merge-patches annotations on a Node; nil values delete
-// keys. The legacy variant of every touched key is deleted as well.
+// keys. Every legacy-stamped key the Node still carries is migrated onto the
+// canonical namespace in the same patch, read from a fresh Get for the reason
+// given on patchPVCAnnotations.
 func (c *Controller) patchNodeAnnotations(ctx context.Context, name string, annotations map[string]*string) error {
-	patch, err := annotationsPatch(withLegacyCleared(annotations))
+	client := c.kclient.CoreV1().Nodes()
+
+	current, err := client.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
+	patch, err := migrator.AnnotationsPatch(migrator.NormalizeLegacy(current.Annotations, annotations))
 	if err != nil {
 		return err
 	}
 
-	_, err = c.kclient.CoreV1().Nodes().Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+	_, err = client.Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 
 	return err
-}
-
-// withLegacyCleared marks the legacy upstream variant of every canonical key
-// in the patch for deletion (unless the patch already addresses it). Writes
-// therefore land on the canonical keys only, and consuming or updating a key
-// always removes a legacy-stamped variant — a legacy request annotation can
-// never linger behind a canonical write and re-trigger a finished migration.
-func withLegacyCleared(annotations map[string]*string) map[string]*string {
-	legacies := make([]string, 0, len(annotations))
-
-	for key := range annotations {
-		if legacy := migrator.LegacyAnnotation(key); legacy != "" {
-			legacies = append(legacies, legacy)
-		}
-	}
-
-	for _, legacy := range legacies {
-		if _, explicit := annotations[legacy]; !explicit {
-			annotations[legacy] = nil
-		}
-	}
-
-	return annotations
-}
-
-func annotationsPatch(annotations map[string]*string) ([]byte, error) {
-	type meta struct {
-		Annotations map[string]*string `json:"annotations"`
-	}
-
-	return json.Marshal(struct {
-		Metadata meta `json:"metadata"`
-	}{Metadata: meta{Annotations: annotations}})
 }
 
 func ptr(s string) *string {

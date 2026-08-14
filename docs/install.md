@@ -251,7 +251,7 @@ migrator:
 ```
 
 See the [Volume Migration Controller — Operator Guide](migration-controller.md) for the full annotation
-workflow (`csi.proxmox.sinextra.dev/migrate-node`, `evacuate`, rebalance, pod-follow).
+workflow (`proxmox.crunchymonkies.com/migrate-node`, `evacuate`, rebalance, pod-follow).
 
 #### Enable volume ownership reassignment (fork)
 

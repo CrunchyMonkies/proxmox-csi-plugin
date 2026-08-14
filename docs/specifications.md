@@ -68,10 +68,10 @@ flowchart LR
 
 | CSI concept | Proxmox concept | Kubernetes label |
 |---|---|---|
-| Region | Proxmox cluster (one API endpoint) | `topology.kubernetes.io/region` or `topology.proxmox.sinextra.dev/region` |
-| Zone | Proxmox node | `topology.kubernetes.io/zone` or `topology.proxmox.sinextra.dev/node` |
+| Region | Proxmox cluster (one API endpoint) | `topology.kubernetes.io/region` or `topology.proxmox.crunchymonkies.com/region` |
+| Zone | Proxmox node | `topology.kubernetes.io/zone` or `topology.proxmox.crunchymonkies.com/node` |
 
-The custom `topology.proxmox.sinextra.dev/*` labels (set by the Proxmox CCM) take precedence as alternatives to the standard labels (`pkg/csi/driver.go`, `ProxmoxRegion`/`ProxmoxNode` constants).
+The custom `topology.proxmox.crunchymonkies.com/*` labels take precedence as alternatives to the standard labels, followed by the legacy `topology.proxmox.sinextra.dev/*` labels the upstream Proxmox CCM sets (`pkg/csi/driver.go`, `ProxmoxRegion`/`ProxmoxNode` and their `*Legacy` constants). The CCM owns those labels, so they are read, never rewritten.
 
 Volumes on node-local storage (LVM, ZFS, local directory) are pinned to one zone; volumes on shared storage (NFS, Ceph) are accessible from any zone in the region (see §5.2).
 
@@ -146,7 +146,7 @@ Global flags: `--config/-f` (Proxmox cloud config), `--kubeconfig/-k`, `--log-le
 
 ### 3.4 Migration controller (`pvecsictl controller`)
 
-An annotation-driven controller (`pkg/controller/migration/controller.go`) that automates volume migration. It watches PVCs for `csi.proxmox.sinextra.dev/migrate-node` annotations and Nodes for `csi.proxmox.sinextra.dev/evacuate` annotations, and executes migrations through the shared orchestration package `pkg/migrator` — strictly one at a time (a single workqueue worker), because force migrations cordon every CSI node.
+An annotation-driven controller (`pkg/controller/migration/controller.go`) that automates volume migration. It watches PVCs for `proxmox.crunchymonkies.com/migrate-node` annotations and Nodes for `proxmox.crunchymonkies.com/evacuate` annotations (the legacy `csi.proxmox.sinextra.dev/*` variants are still read), and executes migrations through the shared orchestration package `pkg/migrator` — strictly one at a time (a single workqueue worker), because force migrations cordon every CSI node.
 
 Key properties (see `docs/migration-controller.md` for the full protocol):
 
@@ -353,7 +353,7 @@ Documented in `docs/options-node.md`; enforced at node-plugin startup and in the
 1. **Topology labels** (required):
    - `topology.kubernetes.io/region` — Proxmox cluster name (must match a `region` in the cloud config)
    - `topology.kubernetes.io/zone` — Proxmox node name
-   - or the CCM equivalents `topology.proxmox.sinextra.dev/region` / `topology.proxmox.sinextra.dev/node`
+   - or `topology.proxmox.crunchymonkies.com/region` / `topology.proxmox.crunchymonkies.com/node` (the legacy CCM equivalents under `topology.proxmox.sinextra.dev/` are still read)
 2. **Provider ID** (default provider): `Node.spec.providerID` in the form `proxmox://<region>/<vmid>`, used to find the VM for disk attachment. With `provider: capmox`, the VMID is resolved through cluster-api-provider-proxmox conventions instead.
 3. **VM SCSI controller**: VMs must use `VirtIO SCSI single` (recommended) or `VirtIO SCSI`.
 4. **Optional per-node attachment limit**: label `csi.proxmox.sinextra.dev/max-volume-attachments` overrides the default of 24 (`pkg/csi/driver.go`, `NodeLabelMaxVolumeAttachments`).

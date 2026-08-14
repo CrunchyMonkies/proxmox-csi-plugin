@@ -20,6 +20,7 @@ package migrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -94,9 +95,10 @@ const (
 )
 
 // Legacy annotation keys under the upstream csi.proxmox.sinextra.dev prefix.
-// Reads fall back to them (GetAnnotation) and the controller clears them
-// alongside the canonical keys when it consumes a request; writes use the
-// canonical keys only.
+// Reads fall back to them (GetAnnotation) and any write to the object folds
+// every one it still carries onto the canonical key (NormalizeLegacy), so an
+// object migrates off this namespace the next time it is touched; writes use
+// the canonical keys only.
 const (
 	// AnnotationMigrateLegacy is the upstream variant of AnnotationMigrate.
 	//
@@ -186,6 +188,54 @@ func GetAnnotation(annotations map[string]string, key string) string {
 // migration-protocol key, or "" when the key has none.
 func LegacyAnnotation(key string) string {
 	return legacyAnnotationAliases[key]
+}
+
+// NormalizeLegacy folds an object's legacy-stamped annotations into a merge
+// patch so writes migrate the object onto the canonical namespace as a side
+// effect of touching it: for every legacy key present in current, the legacy
+// key is deleted and, unless the patch already addresses it, the canonical key
+// takes over the value GetAnnotation would have read (canonical first, legacy
+// second). Keys the object does not carry are never invented.
+//
+// A single merge patch carries both halves, so the value is never briefly
+// absent from both keys. The patch map is modified in place and returned.
+//
+// This is the whole migration story for the namespace rename: there is no
+// sweep and no one-shot command, so an object converges the next time the
+// controller writes to it for any reason — including the keys that reason had
+// nothing to do with. It also means a legacy request annotation can never
+// linger behind a canonical write and re-trigger a finished migration.
+func NormalizeLegacy(current map[string]string, patch map[string]*string) map[string]*string {
+	for canonical, legacy := range legacyAnnotationAliases {
+		if _, stamped := current[legacy]; !stamped {
+			continue
+		}
+
+		if _, explicit := patch[canonical]; !explicit {
+			if v := GetAnnotation(current, canonical); v != "" {
+				patch[canonical] = &v
+			}
+		}
+
+		if _, explicit := patch[legacy]; !explicit {
+			patch[legacy] = nil
+		}
+	}
+
+	return patch
+}
+
+// AnnotationsPatch renders an annotation merge patch; a nil value deletes the
+// key. Pair it with NormalizeLegacy so every write also migrates the object
+// off the legacy namespace.
+func AnnotationsPatch(annotations map[string]*string) ([]byte, error) {
+	type meta struct {
+		Annotations map[string]*string `json:"annotations"`
+	}
+
+	return json.Marshal(struct {
+		Metadata meta `json:"metadata"`
+	}{Metadata: meta{Annotations: annotations}})
 }
 
 // Migration phases reported via AnnotationMigratePhase.
@@ -762,11 +812,29 @@ func (m *Migrator) waitPodsGone(ctx context.Context, req Request) error {
 	return nil
 }
 
-// annotatePV merge-patches a single annotation onto a PV.
+// annotatePV merge-patches a single annotation onto a PV, migrating any
+// legacy-stamped keys the PV still carries onto the canonical namespace in the
+// same patch. A stale legacy migrate-state is not merely untidy: one whose
+// value happens to match a later migration's target makes the resume branch
+// win and skips the shared-storage pre-flight, the check that refuses an
+// export/import that would overwrite a shared file with itself.
+// The legacy keys come from a fresh Get rather than the caller's copy, which
+// was read before a drain that can take minutes: normalization must never copy
+// back a value the object no longer carries.
 func (m *Migrator) annotatePV(ctx context.Context, pvName, key, value string) error {
-	patch := []byte(fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, key, value))
+	client := m.KClient.CoreV1().PersistentVolumes()
 
-	_, err := m.KClient.CoreV1().PersistentVolumes().Patch(ctx, pvName, types.MergePatchType, patch, metav1.PatchOptions{})
+	current, err := client.Get(ctx, pvName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	patch, err := AnnotationsPatch(NormalizeLegacy(current.Annotations, map[string]*string{key: &value}))
+	if err != nil {
+		return err
+	}
+
+	_, err = client.Patch(ctx, pvName, types.MergePatchType, patch, metav1.PatchOptions{})
 
 	return err
 }

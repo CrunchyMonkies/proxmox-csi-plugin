@@ -98,7 +98,7 @@ On success the PV's volume handle and node affinity point at the new zone, the r
 | `proxmox.crunchymonkies.com/migrate-force` | `"true"` | Allow disrupting pods that use the PVC (cordon + delete pods). Without it, an in-use PVC is skipped |
 | `proxmox.crunchymonkies.com/migrate-storage` | storage ID | Move the disk into this storage on the target node (default: keep the storage name). With `migrate-node` set to the volume's **current** node, this performs a same-node storage move (only the storage changes; same-node requests without a different storage are rejected as already-on-target) |
 
-> **Legacy keys.** The same annotations under the upstream `csi.proxmox.sinextra.dev/` prefix remain accepted for compatibility: the controller reads the canonical `proxmox.crunchymonkies.com/` key first and falls back to the legacy variant, and it clears **both** variants when it consumes a request (so a legacy-stamped request cannot linger and re-trigger). Status is written under the canonical keys only. The CSI **driver name** (`csi.proxmox.sinextra.dev`) is unchanged — it is baked into every provisioned PV and keeps the fork drop-in compatible with upstream; only annotation/label keys moved to the project namespace.
+> **Legacy keys.** The same annotations under the upstream `csi.proxmox.sinextra.dev/` prefix remain accepted for compatibility — see [Annotation namespace migration](#annotation-namespace-migration) below.
 
 #### Status annotations (written by the controller)
 
@@ -110,6 +110,20 @@ On success the PV's volume handle and node affinity point at the new zone, the r
 | `proxmox.crunchymonkies.com/migrate-started-at` | RFC3339 start time |
 
 `Failed` is terminal: the controller will not retry until you change or remove the request annotations. Transient errors are retried with exponential backoff up to `--max-attempts` (default 5). `Skipped` means the migration was unnecessary (shared storage — see below).
+
+### Annotation namespace migration
+
+The migration-protocol annotations moved from the upstream `csi.proxmox.sinextra.dev/` prefix to the project's own `proxmox.crunchymonkies.com/` namespace. Nothing has to be done by hand:
+
+- **Reads accept both.** The canonical key is read first, the legacy variant second. A PVC or Node stamped before the upgrade — or by an old script — still works.
+- **Writes normalize the whole object.** Whenever the controller patches a PVC, PV, or Node for any reason, every legacy migration key that object still carries is copied to its canonical name and deleted, in the same merge patch. Not only the keys that write was about: an admin-set `reactive-evacuation`, which the controller never writes on its own, comes across too. The copy and the delete are one patch, so the value is never briefly missing from both keys.
+- **Convergence is lazy.** An object migrates the next time the controller touches it. Objects the controller never touches keep their legacy keys and keep working through the read fallback — there is no sweep, and none is needed.
+
+Clearing the legacy keys is not just tidiness. A stale legacy `migrate-state` left on a PV is read as a resume marker: when its value happens to match a later migration's target node, the resume branch wins and the shared-storage pre-flight — the check that refuses an export/import that would overwrite a shared file with itself — is never reached.
+
+> **Rollback caveat.** Normalization is one-way. Once an object has been normalized, downgrading to a build older than `v0.20.0-1.4.0` (which reads the legacy key only) will not see the value. Roll back before letting the new controller reconcile, or re-stamp the legacy keys by hand.
+
+The CSI **driver name** (`csi.proxmox.sinextra.dev`) is deliberately unchanged — it is baked into every provisioned PV's `volumeHandle` and keeps the fork drop-in compatible with upstream. The CCM-owned `topology.proxmox.sinextra.dev/*` labels and the `instance-id` node annotation are likewise untouched: another project writes them, and they are only ever read here.
 
 ### Node maintenance (evacuation)
 
@@ -176,9 +190,9 @@ The trigger is deliberately narrow to avoid false positives. A migration is stam
 
 When all hold, the target is chosen by free capacity/headroom (the same `auto` selector as evacuation, including its per-zone-storage-name handling via the driver's StorageClasses) and `migrate-node` + `migrate-force` — plus `migrate-storage` when the target zone does not host the source storage name — are stamped on the PVC, emitting a `ReactiveEvacuation` event. If no candidate zone has capacity, a warning event listing the considered storages is emitted and nothing is stamped (no thrashing).
 
-**Operator-managed storage is skipped by default.** If the PVC has a controller `ownerReference` whose owner is a **custom resource** — the owner's `apiVersion` group is not core (`""`), `apps`, or `batch` — the PVC is treated as operator-managed and the reactive trigger skips it, emitting a `ReactiveEvacuationSkipped` event naming the owner. Operators like CloudNativePG own their PVCs' lifecycle and ship native storage-move procedures (replica rebuild, switchover); copying the disk underneath them risks a split-brain with the operator's own state management — and the reactive path stamps `migrate-force`, which bypasses the PodDisruptionBudgets such operators rely on. Built-in workload owners (e.g. an `apps/v1` StatefulSet) do not count as operators. The `csi.proxmox.sinextra.dev/reactive-evacuation` annotation on the PVC overrides the heuristic in both directions:
+**Operator-managed storage is skipped by default.** If the PVC has a controller `ownerReference` whose owner is a **custom resource** — the owner's `apiVersion` group is not core (`""`), `apps`, or `batch` — the PVC is treated as operator-managed and the reactive trigger skips it, emitting a `ReactiveEvacuationSkipped` event naming the owner. Operators like CloudNativePG own their PVCs' lifecycle and ship native storage-move procedures (replica rebuild, switchover); copying the disk underneath them risks a split-brain with the operator's own state management — and the reactive path stamps `migrate-force`, which bypasses the PodDisruptionBudgets such operators rely on. Built-in workload owners (e.g. an `apps/v1` StatefulSet) do not count as operators. The `proxmox.crunchymonkies.com/reactive-evacuation` annotation on the PVC overrides the heuristic in both directions:
 
-| `csi.proxmox.sinextra.dev/reactive-evacuation` | Effect |
+| `proxmox.crunchymonkies.com/reactive-evacuation` | Effect |
 |---|---|
 | `"false"` | Always skip the PVC — protects operators that set no `ownerReferences` on their PVCs |
 | `"true"` | Allow reactive evacuation even when the PVC is operator-owned (the admin knows best) |

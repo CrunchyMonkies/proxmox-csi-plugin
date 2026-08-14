@@ -1296,6 +1296,70 @@ func TestReconcileNodeEvacuateLegacy(t *testing.T) {
 	assert.Contains(t, event, "EvacuationRequested")
 }
 
+func TestReconcilePVCNormalizesUntouchedLegacyKeys(t *testing.T) {
+	// reactive-evacuation is an admin-set override the controller never writes,
+	// and migrate-attempts is not part of an already-on-target completion. Both
+	// still have to come across: any write to the object migrates the WHOLE
+	// object, otherwise a key the controller never happens to patch would sit
+	// under the legacy namespace forever.
+	c, _, _ := newTestController(t,
+		newPVC(map[string]string{
+			migrator.AnnotationMigrateNode:                      testZone,
+			legacyKey(t, migrator.AnnotationReactiveEvacuation): "false",
+			legacyKey(t, migrator.AnnotationMigrateAttempts):    "2",
+		}),
+		newPV("vm-9999-pvc-exist", nil))
+
+	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
+	require.NoError(t, err)
+
+	pvc := getPVC(t, c)
+	assert.Equal(t, migrator.PhaseCompleted, pvc.Annotations[migrator.AnnotationMigratePhase])
+
+	// The values survive the move, under the canonical keys...
+	assert.Equal(t, "false", pvc.Annotations[migrator.AnnotationReactiveEvacuation])
+	assert.Equal(t, "2", pvc.Annotations[migrator.AnnotationMigrateAttempts])
+
+	// ...and nothing is left behind on the legacy namespace at all.
+	for key := range pvc.Annotations {
+		assert.NotContains(t, key, csi.DriverName+"/", "legacy annotation %q survived the write", key)
+	}
+}
+
+func TestMigrateNormalizesLegacyPVState(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.SetupMockResponders()
+
+	disk := "vm-9999-pvc-exist"
+
+	// The move fails, so the run stops with the resume marker still on the PV —
+	// the only state in which the PV's annotations are observable.
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/pve-1/storage/local-lvm/content/`+disk,
+		httpmock.NewJsonResponderOrPanic(500, map[string]any{"data": nil}))
+	httpmock.RegisterResponder(http.MethodGet, "https://127.0.0.1:8006/api2/json/nodes/pve-2/storage/local-lvm/content",
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": []map[string]any{}}))
+
+	// A legacy resume marker from a migration that ran before the rename. Left
+	// in place it is worse than untidy: when its value happens to match a later
+	// target the resume branch wins and the shared-storage pre-flight — the
+	// check that refuses an export/import overwriting a file with itself — is
+	// never reached.
+	c, kclient, _ := newTestController(t,
+		newPVC(map[string]string{migrator.AnnotationMigrateNode: "pve-2"}),
+		newPV(disk, map[string]string{legacyKey(t, migrator.AnnotationMigrateState): "pve-3"}))
+
+	err := c.reconcilePVC(context.Background(), testNS+"/"+testPVCName)
+	require.ErrorContains(t, err, "failed to move disk")
+
+	pv, err := kclient.CoreV1().PersistentVolumes().Get(context.Background(), testPVName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "pve-2", pv.Annotations[migrator.AnnotationMigrateState])
+	assert.NotContains(t, pv.Annotations, legacyKey(t, migrator.AnnotationMigrateState))
+}
+
 func TestEnqueueFiltersLegacy(t *testing.T) {
 	c, _, _ := newTestController(t)
 
