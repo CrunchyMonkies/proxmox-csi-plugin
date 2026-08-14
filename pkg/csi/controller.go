@@ -620,9 +620,29 @@ func (d *ControllerService) ControllerPublishVolume(ctx context.Context, request
 		}
 	}
 
+	cfg := params.ToCFG()
+
+	// Fold in the VolumeAttributesClass the claim currently asks for. The volume
+	// context this attach was configured from is frozen at CreateVolume time, so a
+	// class assigned to a claim afterwards would otherwise never reach Proxmox:
+	// the throttle is a per-VM disk property, and ControllerModifyVolume cannot
+	// write one while the volume is detached. Applying it here is what lets that
+	// modify be a truthful no-op instead of an unbounded retry.
+	//
+	// A lookup failure must never fail the attach, for the same reason the rename
+	// above does not: a throttle that is a reconcile behind is a far smaller
+	// problem than an attach path that can go down cluster-wide.
+	paramsVAC, err := d.effectiveModifyVolumeParameters(ctx, vol)
+	if err != nil {
+		klog.ErrorS(err, "ControllerPublishVolume: failed to resolve volume attributes class, attaching with the volume context alone",
+			"cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
+	} else if paramsVAC != nil {
+		cfg = paramsVAC.MergeMap(cfg)
+	}
+
 	mc := metrics.NewMetricContext("attachVolume")
 
-	pvInfo, err := attachVolume(ctx, cl, id, vol, params.ToCFG())
+	pvInfo, err := attachVolume(ctx, cl, id, vol, cfg)
 	if mc.ObserveRequest(err) != nil {
 		klog.ErrorS(err, "ControllerPublishVolume: failed to attach volume", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
 
@@ -1138,9 +1158,15 @@ func (d *ControllerService) ControllerModifyVolume(ctx context.Context, request 
 	id, _, err := getVMByAttachedVolume(ctx, cl, vol, d.vmID)
 	if err != nil || id == 0 {
 		if err == goproxmox.ErrVirtualMachineNotFound {
-			klog.V(3).InfoS("ControllerModifyVolume: volume is not published, cannot modify unpublished volumeID", "cluster", vol.Cluster(), "volumeID", vol.VolumeID())
+			// Nothing to write: every parameter a class carries is a property of the
+			// disk's entry in a VM config, and a detached volume has no such entry.
+			// Reporting success is still honest — ControllerPublishVolume resolves the
+			// claim's class itself and applies it at attach, so the request is
+			// satisfied by the time the volume can carry it. Failing here instead
+			// would leave external-resizer retrying an idle volume forever.
+			klog.V(3).InfoS("ControllerModifyVolume: volume is not published, parameters will be applied on attach", "cluster", vol.Cluster(), "volumeID", vol.VolumeID())
 
-			return nil, status.Error(codes.NotFound, "volume is not published")
+			return &csi.ControllerModifyVolumeResponse{}, nil
 		}
 
 		klog.ErrorS(err, "ControllerModifyVolume: failed to get vm by attached volume", "cluster", vol.Cluster(), "volumeID", vol.VolumeID())
@@ -1160,6 +1186,104 @@ func (d *ControllerService) ControllerModifyVolume(ctx context.Context, request 
 	klog.V(3).InfoS("ControllerModifyVolume: volume modified", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
 
 	return &csi.ControllerModifyVolumeResponse{}, nil
+}
+
+// effectiveModifyVolumeParameters returns the parameters of the
+// VolumeAttributesClass the volume's claim currently asks for, or nil when the
+// volume has no claim, the claim names no class, or the class belongs to
+// another driver.
+//
+// The volume is resolved to its PV by name rather than by scanning every PV for
+// a matching volumeHandle: the disk name embeds the PV name, and it keeps doing
+// so across a reassignment rename, which only rewrites the vmid.
+//
+// Every miss is reported as (nil, nil) — "no class applies" — and only a real
+// API failure comes back as an error. The caller attaches either way.
+func (d *ControllerService) effectiveModifyVolumeParameters(ctx context.Context, vol *volume.Volume) (*ModifyVolumeParameters, error) {
+	pvName := vol.PV()
+	if pvName == "" {
+		return nil, nil
+	}
+
+	pv, err := d.kclient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != DriverName || pv.Spec.ClaimRef == nil {
+		return nil, nil
+	}
+
+	claim := pv.Spec.ClaimRef
+	if claim.Namespace == "" || claim.Name == "" {
+		return nil, nil
+	}
+
+	pvc, err := d.kclient.CoreV1().PersistentVolumeClaims(claim.Namespace).Get(ctx, claim.Name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	if pvc.Spec.VolumeAttributesClassName == nil || *pvc.Spec.VolumeAttributesClassName == "" {
+		return nil, nil
+	}
+
+	parameters, err := d.volumeAttributesClassParameters(ctx, *pvc.Spec.VolumeAttributesClassName)
+	if err != nil || parameters == nil {
+		return nil, err
+	}
+
+	params, err := ExtractModifyVolumeParameters(parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	return &params, nil
+}
+
+// volumeAttributesClassParameters reads a VolumeAttributesClass, returning nil
+// parameters when the class is owned by another driver or does not exist.
+func (d *ControllerService) volumeAttributesClassParameters(ctx context.Context, name string) (map[string]string, error) {
+	vac, err := d.kclient.StorageV1().VolumeAttributesClasses().Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		if vac.DriverName != DriverName {
+			return nil, nil
+		}
+
+		return vac.Parameters, nil
+	}
+
+	if !errors.IsNotFound(err) {
+		return nil, err
+	}
+
+	// Clusters older than 1.34 serve the class as v1beta1 only, and asking for a
+	// resource the apiserver does not serve comes back as NotFound as well, so the
+	// two cases are indistinguishable here. Report the v1 error if the retry also
+	// fails, since that is the one that describes a cluster where the class is
+	// genuinely missing.
+	vacBeta, errBeta := d.kclient.StorageV1beta1().VolumeAttributesClasses().Get(ctx, name, metav1.GetOptions{})
+	if errBeta != nil {
+		if errors.IsNotFound(errBeta) {
+			return nil, nil
+		}
+
+		return nil, err
+	}
+
+	if vacBeta.DriverName != DriverName {
+		return nil, nil
+	}
+
+	return vacBeta.Parameters, nil
 }
 
 func (d *ControllerService) getVMIDbyNode(ctx context.Context, nodeName string) (int, string, error) { // nolint:unparam

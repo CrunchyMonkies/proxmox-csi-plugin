@@ -97,6 +97,19 @@ parameters:
   replicateZones: "rnd-1,rnd-2"
 ```
 
+### Classes on detached volumes
+
+Every parameter a class carries is a property of the disk's entry in a VM
+config, so none of them can be written while the volume is detached. Assigning a
+class to a claim with no running pod is still allowed: the driver accepts the
+request, and applies the class when the volume next attaches. The claim reports
+the class as current immediately, not once a pod starts.
+
+The attach reads the class the claim asks for at that moment, so a class
+assigned or changed while the volume sat idle is honored — including one
+assigned to a volume created long before the class existed. Removing the class
+returns the volume to its `StorageClass` parameters at the next attach.
+
 ## Parameters:
 
 * `node-stage-secret-name`/`node-expand-secret-name`,  `node-stage-secret-namespace`/`node-expand-secret-namespace` - Refer to the name and namespace of the Secret object in the Kubernetes API. The secrets key name is `encryption-passphrase`. [Official documentation](https://kubernetes-csi.github.io/docs/secrets-and-credentials-storage-class.html)

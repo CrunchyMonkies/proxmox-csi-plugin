@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/jarcoal/httpmock"
@@ -37,6 +38,29 @@ type RenameRequest struct {
 	TargetVolname string
 }
 
+// AttachRequest is one drive line the driver has asked a VM config POST to add.
+type AttachRequest struct {
+	VMID   int
+	Device string
+	// Value is the raw drive line, ie 'local-lvm:vm-9999-pvc-x,backup=0,iops_rd=3000'.
+	Value string
+}
+
+// Options splits the drive line's comma-separated options off the volid.
+func (r AttachRequest) Options() map[string]string {
+	options := map[string]string{}
+
+	parts := strings.Split(r.Value, ",")
+	for _, part := range parts[1:] {
+		k, v, found := strings.Cut(part, "=")
+		if found {
+			options[k] = v
+		}
+	}
+
+	return options
+}
+
 var (
 	mockMu         sync.Mutex
 	renameRequests []RenameRequest
@@ -44,7 +68,21 @@ var (
 	// unlinked, so the config responder can answer the way PVE does afterwards:
 	// the drive key gone and the volume parked under unused0.
 	vm101Unlinked bool
+	// attachRequests records the drives added to VM 100 by a config POST, and
+	// vm100Attached replays them from the config GET so the attach's own
+	// wait-until-visible check can observe what it just wrote.
+	attachRequests []AttachRequest
+	vm100Attached  map[string]string
 )
+
+// AttachRequests returns the drives the driver has attached to VM 100 since the
+// last SetupMockResponders, in the order it asked for them.
+func AttachRequests() []AttachRequest {
+	mockMu.Lock()
+	defer mockMu.Unlock()
+
+	return append([]AttachRequest(nil), attachRequests...)
+}
 
 // RenameRequests returns the proxmod renames the driver has asked for since the
 // last ResetRenameRequests. A rename leaves no trace in the RPC response it
@@ -71,6 +109,8 @@ func SetupMockResponders() {
 
 	mockMu.Lock()
 	vm101Unlinked = false
+	attachRequests = nil
+	vm100Attached = map[string]string{}
 	mockMu.Unlock()
 
 	httpmock.RegisterResponder(http.MethodGet, `=~/version$`,
@@ -404,16 +444,61 @@ func SetupMockResponders() {
 	)
 	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/qemu/100/config`,
 		func(_ *http.Request) (*http.Response, error) {
-			return httpmock.NewJsonResponse(200, map[string]any{
-				"data": map[string]interface{}{
-					"vmid":    100,
-					"scsi0":   "local-lvm:vm-100-disk-0,size=10G",
-					"scsi1":   "local-lvm:vm-9999-pvc-123,backup=0,iothread=1,wwn=0x5056432d49443031",
-					"smbios1": "uuid=11833f4c-341f-4bd3-aad7-f7abed000000",
-				},
-			})
+			config := map[string]interface{}{
+				"vmid":    100,
+				"scsi0":   "local-lvm:vm-100-disk-0,size=10G",
+				"scsi1":   "local-lvm:vm-9999-pvc-123,backup=0,iothread=1,wwn=0x5056432d49443031",
+				"smbios1": "uuid=11833f4c-341f-4bd3-aad7-f7abed000000",
+			}
+
+			mockMu.Lock()
+			for device, value := range vm100Attached {
+				config[device] = value
+			}
+			mockMu.Unlock()
+
+			return httpmock.NewJsonResponse(200, map[string]interface{}{"data": config})
 		},
 	)
+
+	// Attaching a disk to VM 100. Records the drive line and replays it from the
+	// config GET above, which is what lets a test observe the options the driver
+	// chose — they appear nowhere in the RPC response.
+	taskPve1Config := &proxmox.Task{
+		UPID:       "UPID:pve-1:003B4237:1DF4ABCC:667C1C47:qmconfig:100:root@pam:",
+		Type:       "qmconfig",
+		User:       "root",
+		Status:     "stopped",
+		ExitStatus: "OK",
+		Node:       "pve-1",
+		IsRunning:  false,
+	}
+
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/\S+/qemu/100/config`,
+		func(req *http.Request) (*http.Response, error) {
+			params := map[string]interface{}{}
+			if err := json.NewDecoder(req.Body).Decode(&params); err != nil {
+				return httpmock.NewJsonResponse(400, map[string]any{"data": nil})
+			}
+
+			mockMu.Lock()
+
+			for device, value := range params {
+				line, ok := value.(string)
+				if !ok || !strings.HasPrefix(device, "scsi") {
+					continue
+				}
+
+				vm100Attached[device] = line
+				attachRequests = append(attachRequests, AttachRequest{VMID: 100, Device: device, Value: line})
+			}
+			mockMu.Unlock()
+
+			return httpmock.NewJsonResponse(200, map[string]any{"data": taskPve1Config.UPID})
+		},
+	)
+	httpmock.RegisterResponder(http.MethodGet, fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(taskPve1Config.UPID)),
+		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": taskPve1Config}))
 
 	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/qemu/101/status/current`,
 		func(_ *http.Request) (*http.Response, error) {
