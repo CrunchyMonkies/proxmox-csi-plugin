@@ -46,6 +46,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
 
@@ -54,6 +57,17 @@ const (
 
 	// resizeRequired is the key for the volume context parameter to indicate whether resize is required after restore from snapshot
 	resizeRequired = "resizeRequired"
+
+	// eventComponent is the source component reported on events this service emits.
+	eventComponent = "proxmox-csi-controller"
+
+	// reasonReassignVolumeFailed is emitted when the attach-time reassignment
+	// rename fails and the volume is attached under its existing name instead.
+	reasonReassignVolumeFailed = "ReassignVolumeFailed"
+
+	// reasonReassignVolumeBackFailed is emitted when the detach-time rename back
+	// to the placeholder vmid fails, leaving the volume on the target VM's name.
+	reasonReassignVolumeBackFailed = "ReassignVolumeBackFailed"
 )
 
 var controllerCaps = []csi.ControllerServiceCapability_RPC_Type{
@@ -82,6 +96,10 @@ type ControllerService struct {
 	// real target VM at attach time. See docs/reassign-volume-on-attach.md.
 	reassignVolumeOnAttach bool
 
+	// Recorder publishes events against the PVC a volume belongs to. Optional: a
+	// directly constructed ControllerService leaves it nil and emits nothing.
+	Recorder record.EventRecorder
+
 	storageCapacity *cache.Cache
 	vmLocks         *VMLocks
 }
@@ -102,12 +120,16 @@ func NewControllerService(kclient kubernetes.Interface, cloudConfig string, name
 		return nil, fmt.Errorf("failed to create proxmox cluster client: %v", err)
 	}
 
+	broadcaster := record.NewBroadcaster()
+	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kclient.CoreV1().Events("")})
+
 	d := &ControllerService{
 		pxpool:                 px,
 		kclient:                kclient,
 		Provider:               cfg.Features.Provider,
 		vmID:                   cfg.Features.ControllerVMID,
 		reassignVolumeOnAttach: cfg.Features.ReassignVolumeOnAttach,
+		Recorder:               broadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: eventComponent}),
 	}
 
 	d.Init()
@@ -613,6 +635,10 @@ func (d *ControllerService) ControllerPublishVolume(ctx context.Context, request
 		if mc.ObserveRequest(err) != nil {
 			klog.ErrorS(err, "ControllerPublishVolume: failed to rename volume, attaching under its current name",
 				"cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
+
+			d.eventOnClaim(ctx, vol, corev1.EventTypeWarning, reasonReassignVolumeFailed,
+				fmt.Sprintf("Failed to reassign %s to VM %d; attaching under its current name. The volume is usable, but its Proxmox owner stays %s: %v",
+					vol.VolumeID(), id, vol.VMID(), err))
 		} else {
 			klog.V(4).InfoS("ControllerPublishVolume: volume renamed", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "disk", renamed.Disk(), "vmID", id)
 
@@ -754,6 +780,10 @@ func (d *ControllerService) ControllerUnpublishVolume(ctx context.Context, reque
 		renamed, err := toolsproxmox.RenameVolume(ctx, cl, vol, d.vmID)
 		if mc.ObserveRequest(err) != nil {
 			klog.ErrorS(err, "ControllerUnpublishVolume: failed to rename volume back", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
+
+			d.eventOnClaim(ctx, vol, corev1.EventTypeWarning, reasonReassignVolumeBackFailed,
+				fmt.Sprintf("Failed to rename %s back to VM %d after detaching from VM %d; it remains owned by VM %s and will be adopted on its next attach: %v",
+					vol.VolumeID(), d.vmID, id, vol.VMID(), err))
 		} else {
 			klog.V(4).InfoS("ControllerUnpublishVolume: volume renamed back", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "disk", renamed.Disk(), "vmID", id)
 
@@ -1188,18 +1218,17 @@ func (d *ControllerService) ControllerModifyVolume(ctx context.Context, request 
 	return &csi.ControllerModifyVolumeResponse{}, nil
 }
 
-// effectiveModifyVolumeParameters returns the parameters of the
-// VolumeAttributesClass the volume's claim currently asks for, or nil when the
-// volume has no claim, the claim names no class, or the class belongs to
-// another driver.
+// claimForVolume returns the PersistentVolumeClaim a volume is bound to, or nil
+// when the volume has no PV, the PV belongs to another driver, or the PV is
+// unbound.
 //
 // The volume is resolved to its PV by name rather than by scanning every PV for
 // a matching volumeHandle: the disk name embeds the PV name, and it keeps doing
 // so across a reassignment rename, which only rewrites the vmid.
 //
-// Every miss is reported as (nil, nil) — "no class applies" — and only a real
-// API failure comes back as an error. The caller attaches either way.
-func (d *ControllerService) effectiveModifyVolumeParameters(ctx context.Context, vol *volume.Volume) (*ModifyVolumeParameters, error) {
+// Every miss is reported as (nil, nil) — "there is no claim to speak of" — and
+// only a real API failure comes back as an error.
+func (d *ControllerService) claimForVolume(ctx context.Context, vol *volume.Volume) (*corev1.PersistentVolumeClaim, error) {
 	pvName := vol.PV()
 	if pvName == "" {
 		return nil, nil
@@ -1229,6 +1258,46 @@ func (d *ControllerService) effectiveModifyVolumeParameters(ctx context.Context,
 			return nil, nil
 		}
 
+		return nil, err
+	}
+
+	return pvc, nil
+}
+
+// eventOnClaim publishes an event against the claim a volume belongs to.
+//
+// Best effort by construction: it is called from paths that have already
+// decided to carry on, so a missing claim, an unreachable API server or an
+// unset recorder must all end in a log line and nothing more. The only reason
+// this exists is that the failures it reports are otherwise invisible to anyone
+// who is not reading controller logs — which is how the 0.3.0 proxmod defect
+// went unnoticed for a week.
+func (d *ControllerService) eventOnClaim(ctx context.Context, vol *volume.Volume, eventtype, reason, message string) {
+	if d.Recorder == nil {
+		return
+	}
+
+	pvc, err := d.claimForVolume(ctx, vol)
+	if err != nil || pvc == nil {
+		klog.V(4).InfoS("eventOnClaim: no claim to report against",
+			"cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "reason", reason, "error", err)
+
+		return
+	}
+
+	d.Recorder.Event(pvc, eventtype, reason, message)
+}
+
+// effectiveModifyVolumeParameters returns the parameters of the
+// VolumeAttributesClass the volume's claim currently asks for, or nil when the
+// volume has no claim, the claim names no class, or the class belongs to
+// another driver.
+//
+// Every miss is reported as (nil, nil) — "no class applies" — and only a real
+// API failure comes back as an error. The caller attaches either way.
+func (d *ControllerService) effectiveModifyVolumeParameters(ctx context.Context, vol *volume.Volume) (*ModifyVolumeParameters, error) {
+	pvc, err := d.claimForVolume(ctx, vol)
+	if err != nil || pvc == nil {
 		return nil, err
 	}
 
