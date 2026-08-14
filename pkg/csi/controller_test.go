@@ -30,12 +30,16 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi"
+	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/helpers/ptr"
 	testcluster "github.com/sergelogvinov/proxmox-csi-plugin/test/cluster"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	clientkubernetes "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 var _ proto.ControllerServer = (*csi.ControllerService)(nil)
@@ -44,6 +48,9 @@ type baseCSITestSuite struct {
 	suite.Suite
 
 	s *csi.ControllerService
+	// kclient is the same fake the service holds, kept so a test can make an API
+	// call fail on demand.
+	kclient *fake.Clientset
 }
 
 type configTestCase struct {
@@ -144,10 +151,65 @@ func (ts *baseCSITestSuite) setupTestSuite(config string) error {
 					Annotations: map[string]string{},
 				},
 			},
+			{
+				// A volume whose claim was given a VolumeAttributesClass long after the
+				// volume was created, which is the only way the class can reach Proxmox:
+				// the volume context the attach is configured from is frozen at
+				// CreateVolume time and carries no trace of it.
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "PersistentVolume",
+					APIVersion: "v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pvc-unpublished",
+				},
+				Spec: corev1.PersistentVolumeSpec{
+					PersistentVolumeSource: corev1.PersistentVolumeSource{
+						CSI: &corev1.CSIPersistentVolumeSource{
+							Driver:       csi.DriverName,
+							VolumeHandle: "cluster-1/pve-1/local-lvm/vm-9999-pvc-unpublished",
+						},
+					},
+					ClaimRef: &corev1.ObjectReference{
+						Namespace: "default",
+						Name:      "unpublished-claim",
+					},
+				},
+			},
 		},
 	}
 
-	kclient := fake.NewClientset(nodes, pv)
+	pvc := &corev1.PersistentVolumeClaim{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "PersistentVolumeClaim",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "unpublished-claim",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeName:                "pvc-unpublished",
+			VolumeAttributesClassName: ptr.Ptr("proxmox-throttle"),
+		},
+	}
+
+	vac := &storagev1.VolumeAttributesClass{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "VolumeAttributesClass",
+			APIVersion: "storage.k8s.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "proxmox-throttle",
+		},
+		DriverName: csi.DriverName,
+		Parameters: map[string]string{
+			csi.StorageDiskIOPSKey: "3000",
+			csi.StorageDiskMBpsKey: "150",
+		},
+	}
+
+	kclient := fake.NewClientset(nodes, pv, pvc, vac)
 
 	px, err := csi.NewControllerService(kclient, config, "default")
 	if err != nil {
@@ -155,6 +217,7 @@ func (ts *baseCSITestSuite) setupTestSuite(config string) error {
 	}
 
 	ts.s = px
+	ts.kclient = kclient
 	ts.s.Init()
 
 	return nil
@@ -718,6 +781,154 @@ func (ts *configuredTestSuite) TestControllerPublishVolumeError() {
 				ts.Require().Error(err)
 				ts.Require().Equal(testCase.expectedError, err)
 			}
+		})
+	}
+}
+
+// TestControllerPublishVolumeAppliesVolumeAttributesClass covers the case the
+// modify RPC cannot: a class assigned to a claim whose volume already existed.
+// Nothing about it is in the volume context, so if the attach did not resolve
+// the class itself the throttle would never be written at all.
+func (ts *configuredTestSuite) TestControllerPublishVolumeAppliesVolumeAttributesClass() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	resp, err := ts.s.ControllerPublishVolume(context.Background(), &proto.ControllerPublishVolumeRequest{
+		NodeId:   "cluster-1-node-1",
+		VolumeId: "cluster-1/pve-1/local-lvm/vm-9999-pvc-unpublished",
+		VolumeCapability: &proto.VolumeCapability{
+			AccessMode: &proto.VolumeCapability_AccessMode{
+				Mode: proto.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+			AccessType: &proto.VolumeCapability_Mount{
+				Mount: &proto.VolumeCapability_MountVolume{FsType: "ext4"},
+			},
+		},
+		VolumeContext: map[string]string{csi.StorageIDKey: "local-lvm"},
+	})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+
+	attached := testcluster.AttachRequests()
+	ts.Require().Len(attached, 1)
+
+	options := attached[0].Options()
+	ts.Require().Equal("3000", options["iops_rd"])
+	ts.Require().Equal("3000", options["iops_wr"])
+	ts.Require().Equal("150", options["mbps_rd"])
+	ts.Require().Equal("150", options["mbps_wr"])
+
+	// The class does not set these, so the volume context still decides them.
+	ts.Require().Equal("1", options["iothread"])
+	ts.Require().Equal("0", options["backup"])
+}
+
+// TestControllerPublishVolumeSurvivesVolumeAttributesClassLookupFailure: the
+// class is only ever an enrichment of the attach, never a precondition for it.
+func (ts *configuredTestSuite) TestControllerPublishVolumeSurvivesVolumeAttributesClassLookupFailure() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	ts.kclient.PrependReactor("get", "volumeattributesclasses",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("apiserver is unavailable")
+		})
+
+	resp, err := ts.s.ControllerPublishVolume(context.Background(), &proto.ControllerPublishVolumeRequest{
+		NodeId:   "cluster-1-node-1",
+		VolumeId: "cluster-1/pve-1/local-lvm/vm-9999-pvc-unpublished",
+		VolumeCapability: &proto.VolumeCapability{
+			AccessMode: &proto.VolumeCapability_AccessMode{
+				Mode: proto.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+			AccessType: &proto.VolumeCapability_Mount{
+				Mount: &proto.VolumeCapability_MountVolume{FsType: "ext4"},
+			},
+		},
+		VolumeContext: map[string]string{csi.StorageIDKey: "local-lvm"},
+	})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+
+	attached := testcluster.AttachRequests()
+	ts.Require().Len(attached, 1)
+
+	options := attached[0].Options()
+	ts.Require().NotContains(options, "iops_rd")
+	ts.Require().NotContains(options, "mbps_rd")
+}
+
+// TestControllerModifyVolumeUnpublished: a detached volume has no VM config
+// entry to carry a throttle, so there is nothing to write and nothing to wait
+// for — ControllerPublishVolume applies the class when the volume next attaches.
+// Reporting NotFound here instead left external-resizer retrying idle volumes
+// for as long as they stayed idle.
+func (ts *configuredTestSuite) TestControllerModifyVolumeUnpublished() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	resp, err := ts.s.ControllerModifyVolume(context.Background(), &proto.ControllerModifyVolumeRequest{
+		VolumeId: "cluster-1/pve-1/local-lvm/vm-9999-pvc-unpublished",
+		MutableParameters: map[string]string{
+			csi.StorageDiskIOPSKey: "3000",
+			csi.StorageDiskMBpsKey: "150",
+		},
+	})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+	ts.Require().Empty(testcluster.AttachRequests())
+}
+
+func (ts *configuredTestSuite) TestControllerModifyVolumeError() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	tests := []struct {
+		msg           string
+		request       *proto.ControllerModifyVolumeRequest
+		expectedError error
+	}{
+		{
+			msg:           "VolumeID",
+			request:       &proto.ControllerModifyVolumeRequest{},
+			expectedError: status.Error(codes.InvalidArgument, "VolumeID must be provided"),
+		},
+		{
+			msg: "BadParameters",
+			request: &proto.ControllerModifyVolumeRequest{
+				VolumeId:          "cluster-1/pve-1/local-lvm/vm-9999-pvc-123",
+				MutableParameters: map[string]string{csi.StorageDiskIOPSKey: "many"},
+			},
+			expectedError: status.Error(codes.InvalidArgument, "parameters diskIOPS must be a number"),
+		},
+		{
+			msg: "WrongVolumeID",
+			request: &proto.ControllerModifyVolumeRequest{
+				VolumeId: "volume-id",
+			},
+			expectedError: status.Error(codes.InvalidArgument, "VolumeID must be in the format of region/zone/storageName/diskName"),
+		},
+		{
+			msg: "WrongCluster",
+			request: &proto.ControllerModifyVolumeRequest{
+				VolumeId: "fake-region/pve-1/local-lvm/vm-9999-pvc-123",
+			},
+			expectedError: status.Error(codes.Internal, "region not found"),
+		},
+		{
+			msg: "VolumeNotExist",
+			request: &proto.ControllerModifyVolumeRequest{
+				VolumeId: "cluster-1/pve-1/local-lvm/vm-9999-pvc-none",
+			},
+			expectedError: status.Error(codes.NotFound, "volume cluster-1/pve-1/local-lvm/vm-9999-pvc-none not found"),
+		},
+	}
+
+	for _, testCase := range tests {
+		ts.Run(fmt.Sprint(testCase.msg), func() {
+			_, err := ts.s.ControllerModifyVolume(context.Background(), testCase.request)
+			ts.Require().Error(err)
+			ts.Require().Equal(testCase.expectedError, err)
 		})
 	}
 }
