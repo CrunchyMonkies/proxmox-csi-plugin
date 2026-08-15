@@ -55,10 +55,10 @@ Granting only one yields `403 Permission check failed`. See
 [hack/proxmod-csi-storage/README.md](../hack/proxmod-csi-storage/README.md) and
 [hack/pve-token-copy/README.md](../hack/pve-token-copy/README.md).
 
-### Option B — `root@pam` (default)
+### Option B — `root@pam` (fallback)
 
-Without either flag, snapshots use PVE's built-in content `copy` method. That method has
-no `permissions` block, so PVE restricts it to `root@pam`:
+For nodes without either package. With no flag set, snapshots use PVE's built-in content
+`copy` method, which has no `permissions` block, so PVE restricts it to `root@pam`:
 
 ```yaml
 clusters:

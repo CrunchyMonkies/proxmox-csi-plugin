@@ -98,6 +98,14 @@ kubectl label nodes region1-node-1 topology.kubernetes.io/zone=pve-1
 
 Alternatively, you can use [Proxmox Cloud Controller Manager](https://github.com/sergelogvinov/proxmox-cloud-controller-manager). Proxmox CCM will manage topology labels for you.
 
+The driver also needs each node's Proxmox VMID. It takes it from the
+`proxmox://<region>/<vmid>` providerID the Proxmox CCM sets; without that it falls
+back to searching the cluster for the VM whose SMBIOS UUID matches the node, on
+every attach and detach. On distributions that write their own immutable providerID
+— rke2's `rke2://<name>` — no CCM can fix that, so enable
+[`controller.annotateNodeInstanceID`](node-instance-id.md) to have the driver cache
+the VMID it resolved back onto the node.
+
 
 ## Install CSI Driver
 
@@ -218,13 +226,14 @@ kubeletDir: /var/snap/microk8s/common/var/lib/kubelet
 
 #### Enable the Volume Migration Controller (fork)
 
-The migration controller performs online cross-node disk moves. By default it authenticates as
-**root@pam** — Proxmox' built-in disk-copy endpoint has no permission check and is therefore
-root-only. A **scoped API token** works instead once the Proxmox nodes carry a permission-gated
-copy endpoint, enabled per cluster with `proxmod_endpoint: true` (recommended) or
-`token_copy_endpoint: true`; see [Prerequisites](migration-controller.md#prerequisites) for the
-privileges such a token still needs. Either way the credentials live in a **separate** secret from
-the CSI controller config. Add the following to your helm values:
+The migration controller performs online cross-node disk moves. Give it a **scoped API token**
+and install a permission-gated copy endpoint on the Proxmox nodes, enabled per cluster with
+`proxmod_endpoint: true` (recommended) or `token_copy_endpoint: true`; see
+[Prerequisites](migration-controller.md#prerequisites) for the privileges such a token needs.
+Without one of those endpoints the controller falls back to **root@pam**, because Proxmox' own
+disk-copy endpoint has no permission check and is therefore root-only. Either way the credentials
+live in a **separate** secret from the CSI controller config. Add the following to your helm
+values:
 
 ```yaml
 migrator:
@@ -233,9 +242,10 @@ migrator:
     clusters:
       - url: https://cluster-api-1.exmple.com:8006/api2/json
         insecure: false
-        username: "root@pam"
-        password: "super-secret"
+        token_id: "kubernetes-csi@pve!csi"
+        token_secret: "secret"
         region: Region-1
+        proxmod_endpoint: true
         # Preferred storage per Proxmox node, used when the source storage
         # name does not exist on the target node (pod-follow / evacuation):
         primary_storage:
@@ -244,11 +254,24 @@ migrator:
   # Transient helper VM used to convert qcow2/vmdk volumes to raw before moving.
   # Must be a free VMID and differ from the controller VMID (default 9999).
   helperVMID: 9998
+  # Required alongside proxmod_endpoint until #24 is fixed: the startup credential
+  # check reads only the flag, so a token-only config is rejected without it.
+  extraArgs:
+    - --proxmod-endpoint
   # Optional scheduled rebalance CronJob:
   rebalance:
     enabled: false
     schedule: "0 3 * * *"
 ```
+
+> **Note.** `proxmod_endpoint: true` in the config is not currently enough on its own. The
+> migrator's startup check reads only the global `--proxmod-endpoint` flag, so a token-only config
+> exits with `requires a Proxmox root account` before it ever reaches the copy path — hence the
+> `extraArgs` above. Tracked in
+> [#24](https://github.com/CrunchyMonkies/proxmox-csi-plugin/issues/24).
+
+Omit `username` and `password` entirely. The client prefers username/password whenever both are
+present, so leaving them beside a token silently puts you back on `root@pam`.
 
 See the [Volume Migration Controller — Operator Guide](migration-controller.md) for the full annotation
 workflow (`proxmox.crunchymonkies.com/migrate-node`, `evacuate`, rebalance, pod-follow).

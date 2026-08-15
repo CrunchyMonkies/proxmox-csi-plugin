@@ -62,7 +62,7 @@ You can define multiple clusters in the `clusters` section.
   * `token_ref.tokenIdKey` - Secret data key holding the token ID. Optional, default `token_id`.
   * `token_ref.tokenSecretKey` - Secret data key holding the token secret. Optional, default `token_secret`.
 * `region` - The name of the region, which is also used as `topology.kubernetes.io/region` label.
-* `token_copy_endpoint` - Per-cluster override for the server-side volume copy used by volume migration **and by volume snapshots**, routing it through the `pve-csi-copy` package's endpoint so a scoped token replaces `root@pam`. See [`docs/migration-controller.md`](migration-controller.md) and [`docs/volumesnapshot.md`](volumesnapshot.md).
+* `token_copy_endpoint` - Per-cluster override for the server-side volume copy used by volume migration **and by volume snapshots**, routing it through the `pve-csi-copy` package's endpoint so a scoped token is used instead of `root@pam`. See [`docs/migration-controller.md`](migration-controller.md) and [`docs/volumesnapshot.md`](volumesnapshot.md).
 * `proxmod_endpoint` - Per-cluster override for the same copy, routing it through the `proxmox-csi-storage` proxmod extension instead. Same purpose and same ACL requirements as `token_copy_endpoint`, different server-side implementation; wins if both are true. See [`docs/migration-controller.md`](migration-controller.md) and [`docs/volumesnapshot.md`](volumesnapshot.md).
 
 ## Feature flags

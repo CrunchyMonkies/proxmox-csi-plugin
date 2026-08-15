@@ -5,8 +5,8 @@
 
 A [proxmod](https://github.com/CrunchyMonkies/proxmod) extension that gives
 this plugin a token-authorised version of the one operation the [migration
-controller](../../docs/migration-controller.md) currently needs `root@pam`
-for. It adds:
+controller](../../docs/migration-controller.md) would otherwise need
+`root@pam` for. It adds:
 
 - `GET /nodes/{node}/proxmod/csi-storage` — an index
 - `POST /nodes/{node}/proxmod/csi-storage/copy` — cross-storage volume copy,

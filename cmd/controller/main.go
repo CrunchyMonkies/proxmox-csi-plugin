@@ -47,6 +47,10 @@ var (
 
 	cloudconfig = flag.String("cloud-config", "", "The path to the CSI driver cloud config.")
 	kubeconfig  = flag.String("kubeconfig", "", "Absolute path to the kubeconfig file. Either this or master needs to be set if the provisioner is being run out of cluster.")
+
+	annotateNodeInstanceID = flag.Bool("annotate-node-instance-id", false,
+		"Write the resolved Proxmox VMID back to the node as the "+csi.AnnotationProxmoxInstanceID+" annotation, so later lookups skip the cluster scan. "+
+			"Only has an effect where the providerID carries no VMID, and requires patch on nodes.")
 )
 
 func main() {
@@ -132,6 +136,8 @@ func main() {
 		klog.ErrorS(err, "Failed to create controller service")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
+
+	controllerService.AnnotateNodeInstanceID = *annotateNodeInstanceID
 
 	proto.RegisterControllerServer(srv, controllerService)
 	proto.RegisterIdentityServer(srv, identityService)

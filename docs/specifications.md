@@ -156,7 +156,7 @@ Key properties (see `docs/migration-controller.md` for the full protocol):
 - **Node evacuation**: `…/evacuate: <zone|"auto">` on a Node expands into per-PVC requests; `auto` selects targets by free capacity (`pkg/migrator/placement.go`)
 - **Volume follows pods** (opt-in, `--pod-follow`): when every pod mounting a PVC is scheduled in a different zone than the volume (e.g. after VM migration), the volume migrates there automatically. Target storage is matched by name; if the zone lacks it, the per-node `primary_storage` map in the cloud config selects the storage (`…/migrate-storage` annotation, cross-storage disk move)
 - **Leader election** via a `pvecsictl-migrator` Lease; retries with exponential backoff up to `--max-attempts` (default 5), then terminal `Failed`
-- Requires Proxmox **root@pam** credentials (same constraint as `pvecsictl migrate`); deployed by the Helm chart's `migrator.*` values as a separate Deployment with its own ServiceAccount/RBAC/Secret
+- Authenticates with a **scoped API token** where the Proxmox nodes carry a permission-gated copy endpoint (`proxmod_endpoint` / `token_copy_endpoint`), and with **root@pam** otherwise — the same constraint as `pvecsictl migrate`; deployed by the Helm chart's `migrator.*` values as a separate Deployment with its own ServiceAccount/RBAC/Secret
 
 ## 4. CSI Interface Specification
 
@@ -376,7 +376,7 @@ VM.Config.Memory VM.Config.Options VM.Migrate VM.PowerMgmt
 Datastore.Allocate Datastore.AllocateSpace Datastore.Audit
 ```
 
-Conventional setup: user `kubernetes-csi@pve` with token `kubernetes-csi@pve!csi`, created with privilege separation disabled (`privsep=0`). Volume snapshots currently require `root@pam` (see `docs/volumesnapshot.md` — experimental).
+Conventional setup: user `kubernetes-csi@pve` with token `kubernetes-csi@pve!csi`, created with privilege separation disabled (`privsep=0`). Volume snapshots use the same permission-gated copy endpoint as migration, so the scoped token covers them too; without either endpoint package they fall back to `root@pam` (see `docs/volumesnapshot.md` — experimental).
 
 ### 9.2 Kubernetes RBAC (chart templates)
 
@@ -418,7 +418,7 @@ Default namespace: `csi-proxmox`, priority class `system-cluster-critical`.
 | Storage capacity cache TTL | 1 minute | `pkg/csi/controller.go` (`cache.New(time.Minute, …)`) |
 | Replication zones per volume | max 2 | `docs/options.md` |
 | ReadWriteMany across nodes | not supported | §4.3 |
-| Snapshot support | experimental, needs `root@pam` | `docs/volumesnapshot.md` |
+| Snapshot support | experimental, scoped token with a copy endpoint, else `root@pam` | `docs/volumesnapshot.md` |
 | Local-storage volume migration | manual, via `pvecsictl migrate` | `docs/pvecsictl.md` |
 
 Metrics: when `--metrics-address` is set, the controller exposes Prometheus metrics (Proxmox API request counts/latency) at `--metrics-path` (default `/metrics`). See `docs/metrics.md`.

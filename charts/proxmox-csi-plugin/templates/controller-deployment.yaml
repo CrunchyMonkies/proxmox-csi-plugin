@@ -54,6 +54,9 @@ spec:
             - "-v={{ .Values.logVerbosityLevel }}"
             - "--csi-address=unix:///csi/csi.sock"
             - "--cloud-config={{ .Values.configFile }}"
+            {{- if .Values.controller.annotateNodeInstanceID }}
+            - "--annotate-node-instance-id"
+            {{- end }}
             {{- if .Values.metrics.enabled }}
             - "--metrics-address=:{{ .Values.metrics.port }}"
             {{- end }}

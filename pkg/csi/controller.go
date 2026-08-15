@@ -45,6 +45,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -95,6 +96,13 @@ type ControllerService struct {
 	// ControllerPublishVolume reassigns a volume's Proxmox ownership (vmid) to the
 	// real target VM at attach time. See docs/reassign-volume-on-attach.md.
 	reassignVolumeOnAttach bool
+
+	// AnnotateNodeInstanceID makes getVMIDbyNode write the VMID it resolved back
+	// onto the node, so the next lookup reads an annotation instead of repeating
+	// the cluster-wide scan that produced it. Off by default: it is only worth
+	// anything where the providerID cannot carry the VMID, and it needs patch on
+	// nodes. See --annotate-node-instance-id and docs/node-instance-id.md.
+	AnnotateNodeInstanceID bool
 
 	// Recorder publishes events against the PVC a volume belongs to. Optional: a
 	// directly constructed ControllerService leaves it nil and emits nothing.
@@ -1369,6 +1377,8 @@ func (d *ControllerService) getVMIDbyNode(ctx context.Context, nodeName string) 
 				return 0, "", status.Error(codes.Internal, err.Error())
 			}
 
+			d.recordNodeInstanceID(ctx, node, id)
+
 			return id, region, nil
 		}
 
@@ -1381,10 +1391,48 @@ func (d *ControllerService) getVMIDbyNode(ctx context.Context, nodeName string) 
 			return 0, "", status.Error(codes.Internal, err.Error())
 		}
 
+		d.recordNodeInstanceID(ctx, node, id)
+
 		return id, region, nil
 	}
 
 	return id, "", nil
+}
+
+// recordNodeInstanceID writes a resolved VMID onto the node as the canonical
+// instance-id annotation, so the next lookup reads it back through
+// ProxmoxVMIDbyNode instead of repeating the scan that produced it.
+//
+// Only reached on the fallback path, which is where the cost is: FindVMByNode
+// walks every VM in the cluster and reads each candidate's config to compare
+// SMBIOS UUIDs. Clusters that cannot express the VMID in a providerID — rke2
+// writes an immutable rke2://<name>, so the driver never gets one — otherwise pay
+// that scan on every attach and detach, forever.
+//
+// Best effort by design. The VMID is already resolved and the caller can complete
+// without the annotation, so a failed patch is logged and swallowed rather than
+// turned into a failed attach. The usual cause is the controller not holding patch
+// on nodes, which costs one denied request per fallback and nothing else.
+func (d *ControllerService) recordNodeInstanceID(ctx context.Context, node *corev1.Node, vmID int) {
+	if !d.AnnotateNodeInstanceID || node == nil || vmID == 0 {
+		return
+	}
+
+	value := strconv.Itoa(vmID)
+	if node.Annotations[AnnotationProxmoxInstanceID] == value {
+		return
+	}
+
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, AnnotationProxmoxInstanceID, value)
+
+	if _, err := d.kclient.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+		klog.V(3).InfoS("failed to annotate node with the proxmox instance-id, it will be resolved again next time",
+			"nodeID", node.Name, "vmID", vmID, "annotation", AnnotationProxmoxInstanceID, "err", err)
+
+		return
+	}
+
+	klog.V(4).InfoS("annotated node with the proxmox instance-id", "nodeID", node.Name, "vmID", vmID, "annotation", AnnotationProxmoxInstanceID)
 }
 
 // checkVolume returns the size of the volume, and is the one step every RPC that
