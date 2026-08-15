@@ -207,12 +207,23 @@ func retryOutcome(res *http.Response, err error) string {
 // never wrote, and the status code is lost with it. Swapping the code — while
 // leaving the status line alone, which is what the library puts in the error —
 // turns that into "596 Connection error".
+//
+// Only statuses the library ignores may be rewritten. 401 and 403 in particular
+// must reach it untouched: Client.Req answers them by creating a session and
+// replaying the request, which is the whole of ticket authentication. PVE
+// answers an unauthenticated request with 401 and an empty body, so rewriting it
+// would turn every credentials-based login into a hard "401 No ticket".
 func describeStatus(res *http.Response) (*http.Response, error) {
-	switch {
-	case res.StatusCode < http.StatusBadRequest,
-		res.StatusCode == http.StatusBadRequest,
-		res.StatusCode == http.StatusInternalServerError,
-		res.StatusCode == http.StatusNotImplemented:
+	switch res.StatusCode {
+	case http.StatusBadRequest,
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusInternalServerError,
+		http.StatusNotImplemented:
+		return res, nil
+	}
+
+	if res.StatusCode < http.StatusBadRequest {
 		return res, nil
 	}
 

@@ -380,7 +380,8 @@ Since `v0.20.0-1.4.1` the driver:
   fails the whole volume operation. Writes (disk copy, rename, config change, content delete) are
   **never** replayed;
 * reports the real status line, so the same failure now reads `596 Connection error` instead of
-  `unexpected end of JSON input`;
+  `unexpected end of JSON input`. 400, 401, 403, 500 and 501 are passed through untouched — the client
+  library acts on those itself, and 401 in particular is how a username/password login is triggered;
 * bounds every API call with a 90 s client timeout — previously the secure path used
   `http.DefaultClient`, which has no timeout at all;
 * issues one `GET` per VM in the node scan loops instead of three.
