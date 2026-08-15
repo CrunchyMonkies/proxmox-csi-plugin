@@ -27,6 +27,7 @@ import (
 type CSIMetrics struct {
 	Duration *metrics.HistogramVec
 	Errors   *metrics.CounterVec
+	Retries  *metrics.CounterVec
 }
 
 var apiMetrics = registerAPIMetrics()
@@ -43,6 +44,17 @@ func (mc *MetricContext) ObserveRequest(err error) error {
 	return err
 }
 
+// ObserveRetry counts one retried Proxmox API request. outcome is the HTTP
+// status that provoked the retry, or a short description of the transport error
+// when there was no response at all.
+//
+// A retry is not a failure — the point of the counter is that it is the only
+// signal that the API is answering badly before it answers badly enough to fail
+// a volume operation.
+func ObserveRetry(method, outcome string) {
+	apiMetrics.Retries.WithLabelValues(method, outcome).Inc()
+}
+
 func registerAPIMetrics() *CSIMetrics {
 	metrics := &CSIMetrics{
 		Duration: metrics.NewHistogramVec(
@@ -56,11 +68,17 @@ func registerAPIMetrics() *CSIMetrics {
 				Name: "proxmox_api_request_errors_total",
 				Help: "Total number of errors for an Proxmox API call",
 			}, []string{"request"}),
+		Retries: metrics.NewCounterVec(
+			&metrics.CounterOpts{
+				Name: "proxmox_api_request_retries_total",
+				Help: "Total number of retried Proxmox API requests, by method and the outcome that provoked the retry",
+			}, []string{"method", "outcome"}),
 	}
 
 	legacyregistry.MustRegister(
 		metrics.Duration,
 		metrics.Errors,
+		metrics.Retries,
 	)
 
 	return metrics

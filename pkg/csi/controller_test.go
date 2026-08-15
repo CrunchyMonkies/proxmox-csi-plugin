@@ -951,6 +951,27 @@ func (ts *configuredTestSuite) TestControllerPublishVolumeSilentOnSuccessfulReas
 	ts.Require().Empty(events())
 }
 
+// TestControllerPublishVolumeSurvivesFlakyAPI: a Proxmox API that answers a
+// couple of reads badly must not fail an attach.
+//
+// This is the live failure the retrying transport was written for. A burst of
+// controller calls provoked 33 "unexpected end of JSON input" errors in a
+// fourteen-second window — an empty-bodied 596 from pveproxy, which the client
+// library reported as a JSON parse error with the status code thrown away. One
+// such read anywhere in the per-VM scan aborted the whole lookup, because
+// GetVMByFilter returns on the first callback error.
+func (ts *configuredTestSuite) TestControllerPublishVolumeSurvivesFlakyAPI() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	testcluster.FailNextReads(2)
+
+	resp, err := ts.publishVolume()
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+	ts.Require().Len(testcluster.AttachRequests(), 1)
+}
+
 // TestControllerUnpublishVolumeEventsFailedRenameBack: a volume left on the
 // target VM's name is still resolved by suffix and adopted on its next attach,
 // so the detach succeeds — but until then the PV's volumeHandle names something

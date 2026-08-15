@@ -76,7 +76,54 @@ var (
 	// renameFailure, when non-empty, makes the rename endpoint answer with it
 	// instead of renaming. See FailRenames.
 	renameFailure string
+	// readFailures counts down the GETs that answer badly instead of answering.
+	// See FailNextReads.
+	readFailures int
 )
+
+// FailNextReads makes the next n GETs of the Proxmox API answer with an
+// empty-bodied 596, the way pveproxy does when it cannot reach pvedaemon.
+//
+// This is the shape of the failure that produced 33 "unexpected end of JSON
+// input" errors on a live cluster in a fourteen-second window: nothing wrong
+// with the volume, just an API answering badly under a burst. Reset by
+// SetupMockResponders.
+func FailNextReads(n int) {
+	mockMu.Lock()
+	defer mockMu.Unlock()
+
+	readFailures = n
+}
+
+// readFails reports whether this GET is one of the ones FailNextReads asked for,
+// consuming it.
+func readFails() bool {
+	mockMu.Lock()
+	defer mockMu.Unlock()
+
+	if readFailures <= 0 {
+		return false
+	}
+
+	readFailures--
+
+	return true
+}
+
+// registerGet registers a GET responder that FailNextReads can make flaky.
+func registerGet(path string, responder httpmock.Responder) {
+	httpmock.RegisterResponder(http.MethodGet, path, func(req *http.Request) (*http.Response, error) {
+		if readFails() {
+			res := httpmock.NewStringResponse(596, "")
+			res.Status = "596 Connection error"
+			res.ContentLength = 0
+
+			return res, nil
+		}
+
+		return responder(req)
+	})
+}
 
 // FailRenames makes the proxmod rename endpoint refuse every call with a 500
 // carrying the given message, which is how a node running an extension that
@@ -126,21 +173,22 @@ func SetupMockResponders() {
 	attachRequests = nil
 	vm100Attached = map[string]string{}
 	renameFailure = ""
+	readFailures = 0
 	mockMu.Unlock()
 
-	httpmock.RegisterResponder(http.MethodGet, `=~/version$`,
+	registerGet(`=~/version$`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.Version{Version: "8.4"},
 			})
 		})
-	httpmock.RegisterResponder(http.MethodGet, `=~/cluster/status`,
+	registerGet(`=~/cluster/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.NodeStatuses{{Name: "pve-1"}, {Name: "pve-2"}, {Name: "pve-3"}},
 			})
 		})
-	httpmock.RegisterResponder(http.MethodGet, "=~/cluster/resources",
+	registerGet("=~/cluster/resources",
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.ClusterResources{
@@ -232,26 +280,26 @@ func SetupMockResponders() {
 		},
 	)
 
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/status`,
+	registerGet(`=~/nodes/pve-1/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.Node{},
 			})
 		})
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-2/status`,
+	registerGet(`=~/nodes/pve-2/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.Node{},
 			})
 		})
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-3/status`,
+	registerGet(`=~/nodes/pve-3/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.Node{},
 			})
 		})
 
-	httpmock.RegisterResponder(http.MethodGet, "=~/nodes$",
+	registerGet("=~/nodes$",
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": []proxmox.NodeStatus{
@@ -271,7 +319,7 @@ func SetupMockResponders() {
 			})
 		})
 
-	httpmock.RegisterResponder(http.MethodGet, `=~/storage/rbd$`,
+	registerGet(`=~/storage/rbd$`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.ClusterStorage{
@@ -283,7 +331,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/rbd/status`,
+	registerGet(`=~/nodes/\S+/storage/rbd/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.Storage{
@@ -299,7 +347,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/zfs/status`,
+	registerGet(`=~/nodes/\S+/storage/zfs/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.Storage{
@@ -314,7 +362,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/local-lvm/status`,
+	registerGet(`=~/nodes/\S+/storage/local-lvm/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.Storage{
@@ -329,7 +377,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/\S+/status`,
+	registerGet(`=~/nodes/\S+/storage/\S+/status`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(400, map[string]any{
 				"data":    nil,
@@ -341,7 +389,7 @@ func SetupMockResponders() {
 		},
 	)
 
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/smb/content`,
+	registerGet(`=~/nodes/\S+/storage/smb/content`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": []proxmox.StorageContent{
@@ -355,7 +403,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/rbd/content`,
+	registerGet(`=~/nodes/\S+/storage/rbd/content`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": []proxmox.StorageContent{
@@ -369,7 +417,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/local-lvm/content`,
+	registerGet(`=~/nodes/\S+/storage/local-lvm/content`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": []proxmox.StorageContent{
@@ -410,7 +458,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/storage/\S+/content`,
+	registerGet(`=~/nodes/\S+/storage/\S+/content`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(500, map[string]any{
 				"data":    nil,
@@ -419,7 +467,7 @@ func SetupMockResponders() {
 		},
 	)
 
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-1/qemu$`,
+	registerGet(`=~/nodes/pve-1/qemu$`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": []proxmox.VirtualMachine{
@@ -432,7 +480,7 @@ func SetupMockResponders() {
 				},
 			})
 		})
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/pve-2/qemu$`,
+	registerGet(`=~/nodes/pve-2/qemu$`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": []proxmox.VirtualMachine{
@@ -445,7 +493,7 @@ func SetupMockResponders() {
 				},
 			})
 		})
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/qemu/100/status/current`,
+	registerGet(`=~/nodes/\S+/qemu/100/status/current`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.VirtualMachine{
@@ -457,7 +505,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/qemu/100/config`,
+	registerGet(`=~/nodes/\S+/qemu/100/config`,
 		func(_ *http.Request) (*http.Response, error) {
 			config := map[string]interface{}{
 				"vmid":    100,
@@ -512,10 +560,10 @@ func SetupMockResponders() {
 			return httpmock.NewJsonResponse(200, map[string]any{"data": taskPve1Config.UPID})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(taskPve1Config.UPID)),
+	registerGet(fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(taskPve1Config.UPID)),
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": taskPve1Config}))
 
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/qemu/101/status/current`,
+	registerGet(`=~/nodes/\S+/qemu/101/status/current`,
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]any{
 				"data": proxmox.VirtualMachine{
@@ -527,7 +575,7 @@ func SetupMockResponders() {
 			})
 		},
 	)
-	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/\S+/qemu/101/config`,
+	registerGet(`=~/nodes/\S+/qemu/101/config`,
 		func(_ *http.Request) (*http.Response, error) {
 			config := map[string]interface{}{
 				"vmid":  101,
@@ -556,7 +604,7 @@ func SetupMockResponders() {
 		},
 	)
 
-	httpmock.RegisterResponder("GET", "https://127.0.0.2:8006/api2/json/nodes/pve-3/qemu/100/config",
+	registerGet("https://127.0.0.2:8006/api2/json/nodes/pve-3/qemu/100/config",
 		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(200, map[string]interface{}{
 				"data": map[string]interface{}{
@@ -602,9 +650,9 @@ func SetupMockResponders() {
 		IsRunning:  false,
 	}
 
-	httpmock.RegisterResponder(http.MethodGet, fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(task.UPID)),
+	registerGet(fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(task.UPID)),
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": task}))
-	httpmock.RegisterResponder(http.MethodGet, fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(taskErr.UPID)),
+	registerGet(fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-1", string(taskErr.UPID)),
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": taskErr}))
 
 	// Detaching a disk from VM 101, for the reassign paths that have to unlink a
@@ -627,7 +675,7 @@ func SetupMockResponders() {
 
 			return httpmock.NewJsonResponse(200, map[string]any{"data": taskPve2.UPID})
 		})
-	httpmock.RegisterResponder(http.MethodGet, fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-2", string(taskPve2.UPID)),
+	registerGet(fmt.Sprintf(`=~/nodes/%s/tasks/%s/status`, "pve-2", string(taskPve2.UPID)),
 		httpmock.NewJsonResponderOrPanic(200, map[string]any{"data": taskPve2}))
 
 	httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/pve-1/storage/local-lvm/content/vm-9999-pvc-123`,

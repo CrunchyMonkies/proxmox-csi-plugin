@@ -19,10 +19,8 @@ package proxmoxpool
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 
@@ -106,19 +104,13 @@ func NewProxmoxPool(config []*ProxmoxCluster, options ...proxmox.Option) (*Proxm
 		proxmodEndpoint := make(map[string]*bool, clusters)
 
 		for _, cfg := range config {
-			opts := []proxmox.Option{proxmox.WithUserAgent("ProxmoxCSIPlugin/1.0")}
-			opts = append(opts, options...)
-
-			if cfg.Insecure {
-				httpTr := &http.Transport{
-					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true,
-						MinVersion:         tls.VersionTLS12,
-					},
-				}
-
-				opts = append(opts, proxmox.WithHTTPClient(&http.Client{Transport: httpTr}))
+			// The HTTP client goes in before the caller's options, so a
+			// caller-supplied WithHTTPClient still wins.
+			opts := []proxmox.Option{
+				proxmox.WithUserAgent("ProxmoxCSIPlugin/1.0"),
+				proxmox.WithHTTPClient(newAPIHTTPClient(cfg.Insecure)),
 			}
+			opts = append(opts, options...)
 
 			if cfg.TokenID == "" && cfg.TokenIDFile != "" {
 				var err error
@@ -321,7 +313,7 @@ func (c *ProxmoxPool) FindVMByNode(ctx context.Context, node *v1.Node) (vmID int
 				return false, nil
 			}
 
-			vm, err := px.GetVMConfig(ctx, int(rs.VMID))
+			vm, err := GetVMConfigByResource(ctx, px, rs)
 			if err != nil {
 				return false, err
 			}
@@ -358,7 +350,7 @@ func (c *ProxmoxPool) FindVMByUUID(ctx context.Context, uuid string) (vmID int, 
 				return false, nil
 			}
 
-			vm, err := px.GetVMConfig(ctx, int(rs.VMID))
+			vm, err := GetVMConfigByResource(ctx, px, rs)
 			if err != nil {
 				return false, err
 			}
