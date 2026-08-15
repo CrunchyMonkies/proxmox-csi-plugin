@@ -215,6 +215,36 @@ func TestCopyEndpoint(t *testing.T) {
 	}
 }
 
+// TestClusterCopyEndpointMatchesPool pins the property the credential check depends
+// on: a cluster answers on its own exactly what the pool answers for it, so anything
+// validating before the pool exists cannot disagree with the copy that follows.
+func TestClusterCopyEndpointMatchesPool(t *testing.T) {
+	truePtr, falsePtr := true, false
+
+	cfg := []*pxpool.ProxmoxCluster{
+		{URL: "https://127.0.0.1:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "unset"},
+		{URL: "https://127.0.0.2:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "token", TokenCopyEndpoint: &truePtr},
+		{URL: "https://127.0.0.3:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "proxmod", ProxmodEndpoint: &truePtr},
+		{URL: "https://127.0.0.4:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "both", TokenCopyEndpoint: &truePtr, ProxmodEndpoint: &truePtr},
+		{URL: "https://127.0.0.5:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "proxmod-off", ProxmodEndpoint: &falsePtr},
+		{URL: "https://127.0.0.6:8006/api2/json", TokenID: "user!id", TokenSecret: "s", Region: "token-off", TokenCopyEndpoint: &falsePtr},
+	}
+
+	pool, err := pxpool.NewProxmoxPool(cfg)
+	assert.Nil(t, err)
+
+	for _, fallbacks := range [][2]bool{{false, false}, {true, false}, {false, true}, {true, true}} {
+		tokenCopyFallback, proxmodFallback := fallbacks[0], fallbacks[1]
+
+		for _, cl := range cfg {
+			assert.Equal(t,
+				pool.CopyEndpoint(cl.Region, tokenCopyFallback, proxmodFallback),
+				cl.CopyEndpoint(tokenCopyFallback, proxmodFallback),
+				"region=%s token-copy-fallback=%t proxmod-fallback=%t", cl.Region, tokenCopyFallback, proxmodFallback)
+		}
+	}
+}
+
 func TestCopyEndpointString(t *testing.T) {
 	assert.Equal(t, "builtin", pxpool.CopyEndpointBuiltin.String())
 	assert.Equal(t, "token-copy-endpoint", pxpool.CopyEndpointCSICopy.String())

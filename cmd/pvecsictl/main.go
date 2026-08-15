@@ -31,31 +31,33 @@ import (
 )
 
 // requireMigrationCredentials verifies each cluster carries credentials capable of
-// copying volumes. Without a token-authorized copy endpoint the copy runs through
-// PVE's built-in root@pam-only "copy" method, so username/password (a root account)
-// is required. With --token-copy-endpoint or --proxmod-endpoint the copy is authorized
-// by the token's ACL — the two endpoints have identical credential requirements — so
-// an API token (or username/password) is accepted.
+// copying volumes. Which credentials those are depends on the endpoint the copy will
+// go to, so it asks the cluster the same question the copy asks: the per-cluster
+// token_copy_endpoint / proxmod_endpoint keys win, and the --token-copy-endpoint /
+// --proxmod-endpoint flags are the fallback for clusters that set neither.
+//
+// Copying through PVE's built-in "copy" method needs username/password, because that
+// method carries no permission check and PVE therefore restricts it to root@pam. The
+// two token copy endpoints are ACL-gated instead — identical credential requirements,
+// different server-side implementations — so either accepts an API token.
 func requireMigrationCredentials(clusters []*pxpool.ProxmoxCluster, tokenEndpoint, proxmodEndpoint bool) error {
 	for _, cl := range clusters {
 		hasUserPass := cl.Username != "" && cl.Password != ""
 
-		if !tokenEndpoint && !proxmodEndpoint {
+		endpoint := cl.CopyEndpoint(tokenEndpoint, proxmodEndpoint)
+		if endpoint == pxpool.CopyEndpointBuiltin {
 			if !hasUserPass {
-				return fmt.Errorf("cluster %s: requires a Proxmox root account (username/password), or install a token copy endpoint and pass --%s or --%s", cl.Region, flagProxmodEndpoint, flagTokenCopyEndpoint)
+				return fmt.Errorf("cluster %s: copies through Proxmox' built-in endpoint, which requires a root account (username/password); "+
+					"to use an API token instead, install a token copy endpoint and set proxmod_endpoint (or token_copy_endpoint) on the cluster, or pass --%s or --%s",
+					cl.Region, flagProxmodEndpoint, flagTokenCopyEndpoint)
 			}
 
 			continue
 		}
 
-		flag := flagTokenCopyEndpoint
-		if proxmodEndpoint {
-			flag = flagProxmodEndpoint
-		}
-
 		hasToken := (cl.TokenID != "" || cl.TokenIDFile != "") && (cl.TokenSecret != "" || cl.TokenSecretFile != "")
 		if !hasToken && !hasUserPass {
-			return fmt.Errorf("--%s requires an API token (token_id/token_secret) or username/password in the config file (cluster=%s)", flag, cl.Region)
+			return fmt.Errorf("cluster %s: the %s copy endpoint requires an API token (token_id/token_secret) or username/password in the config file", cl.Region, endpoint)
 		}
 	}
 

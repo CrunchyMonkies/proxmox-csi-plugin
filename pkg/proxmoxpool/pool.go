@@ -163,8 +163,15 @@ func NewProxmoxPool(config []*ProxmoxCluster, options ...proxmox.Option) (*Proxm
 // the token-authorized copy endpoint. The per-cluster config value wins when set;
 // otherwise fallback (the migrator's global default) applies.
 func (c *ProxmoxPool) TokenCopyEndpoint(region string, fallback bool) bool {
-	if v, ok := c.tokenCopyEndpoint[region]; ok && v != nil {
-		return *v
+	return resolveEndpointOverride(c.tokenCopyEndpoint[region], fallback)
+}
+
+// resolveEndpointOverride applies a per-cluster override against the migrator's
+// global default: the override wins when the config sets it, the fallback answers
+// when it does not.
+func resolveEndpointOverride(override *bool, fallback bool) bool {
+	if override != nil {
+		return *override
 	}
 
 	return fallback
@@ -173,11 +180,7 @@ func (c *ProxmoxPool) TokenCopyEndpoint(region string, fallback bool) bool {
 // ProxmodEndpoint reports whether volume migration on the given region should use the
 // proxmod extension's copy endpoint. Resolved exactly like TokenCopyEndpoint.
 func (c *ProxmoxPool) ProxmodEndpoint(region string, fallback bool) bool {
-	if v, ok := c.proxmodEndpoint[region]; ok && v != nil {
-		return *v
-	}
-
-	return fallback
+	return resolveEndpointOverride(c.proxmodEndpoint[region], fallback)
 }
 
 // CopyEndpoint identifies which server-side implementation of the cross-storage
@@ -215,10 +218,25 @@ func (e CopyEndpoint) String() string {
 // token endpoints resolve true: the two are alternative implementations of the same
 // operation, and proxmod is the supported one.
 func (c *ProxmoxPool) CopyEndpoint(region string, tokenCopyFallback, proxmodFallback bool) CopyEndpoint {
+	return resolveCopyEndpoint(c.tokenCopyEndpoint[region], c.proxmodEndpoint[region], tokenCopyFallback, proxmodFallback)
+}
+
+// CopyEndpoint resolves this cluster's own overrides against the migrator's global
+// defaults, giving the same answer ProxmoxPool.CopyEndpoint gives for a cluster
+// already in a pool. It exists for the callers that have to know the endpoint before
+// the pool is built — credential validation, which has to agree with what the copy
+// will actually do.
+func (c *ProxmoxCluster) CopyEndpoint(tokenCopyFallback, proxmodFallback bool) CopyEndpoint {
+	return resolveCopyEndpoint(c.TokenCopyEndpoint, c.ProxmodEndpoint, tokenCopyFallback, proxmodFallback)
+}
+
+// resolveCopyEndpoint holds the precedence both CopyEndpoint methods answer with, so
+// validation and execution cannot drift apart.
+func resolveCopyEndpoint(tokenCopy, proxmod *bool, tokenCopyFallback, proxmodFallback bool) CopyEndpoint {
 	switch {
-	case c.ProxmodEndpoint(region, proxmodFallback):
+	case resolveEndpointOverride(proxmod, proxmodFallback):
 		return CopyEndpointProxmod
-	case c.TokenCopyEndpoint(region, tokenCopyFallback):
+	case resolveEndpointOverride(tokenCopy, tokenCopyFallback):
 		return CopyEndpointCSICopy
 	default:
 		return CopyEndpointBuiltin

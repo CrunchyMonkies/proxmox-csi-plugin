@@ -433,6 +433,18 @@ migrator:
   # -- Enable leader election.
   leaderElection: true
 
+  # -- Copy volumes through the `proxmox-csi-storage` proxmod extension's
+  # permission-gated endpoint instead of Proxmox' built-in root-only copy, so the
+  # migrator authenticates with a scoped API token. Needs the `proxmod` and
+  # `proxmox-csi-storage` packages on every Proxmox node.
+  # This is the fleet-wide default; a cluster that sets `proxmod_endpoint` in the
+  # cloud config overrides it, so a mixed fleet needs no flag at all.
+  proxmodEndpoint: false
+
+  # -- As `proxmodEndpoint`, but for the older `pve-csi-copy` package
+  # (`token_copy_endpoint` per cluster). `proxmodEndpoint` wins if both are set.
+  tokenCopyEndpoint: false
+
   # -- Volume follows pods: automatically migrate a volume when every pod
   # mounting it has been scheduled in a different zone (e.g. after VM
   # migration). Storage is matched by name, falling back to the cluster's
