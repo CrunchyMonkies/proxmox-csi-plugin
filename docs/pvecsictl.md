@@ -94,9 +94,34 @@ Found unused volume vm-9999-pvc-a7aae4d6-36bd-4fc6-83d2-55c0aa26f45a with size 1
 
 ### Migrate
 
-Migration requires root privileges on the Proxmox cluster by default, because the
-built-in disk-copy endpoint is root-only. Provide the cloud-config with root
-credentials (username/password):
+Migration needs a Proxmox credential that is allowed to copy a disk. Install a
+permission-gated copy endpoint on the Proxmox nodes and a **scoped API token** is
+enough — no `root@pam` anywhere:
+
+```yaml
+clusters:
+  - url: https://cluster-1:8006/api2/json
+    token_id: "kubernetes-csi@pve!csi"
+    token_secret: "secret"
+    region: fsn1
+    proxmod_endpoint: true
+    ...
+```
+
+Provide **only** the token: the client prefers username/password when both are
+present, so leaving them in silently puts you back on root@pam.
+
+Two endpoint implementations, identical credential requirements:
+
+* [`proxmox-csi-storage`](../hack/proxmod-csi-storage/) (plus `proxmod`) with
+  `--proxmod-endpoint` — **recommended**, registers via proxmod's supported
+  extension mechanism.
+* [`pve-csi-copy`](../hack/pve-token-copy/) with `--token-copy-endpoint` — the
+  original self-contained hack, still supported.
+
+Without either package the only path is Proxmox' built-in disk-copy endpoint,
+which carries no permission check and is therefore root-only. Then, and only then,
+provide root credentials instead of the token:
 
 ```yaml
 clusters:
@@ -106,16 +131,6 @@ clusters:
     region: fsn1
     ...
 ```
-
-Alternatively, install a permission-gated copy endpoint on the Proxmox nodes; the
-copy then runs through it and a scoped API token is sufficient (no `root@pam`).
-Two implementations, identical credential requirements:
-
-* [`proxmox-csi-storage`](../hack/proxmod-csi-storage/) (plus `proxmod`) with
-  `--proxmod-endpoint` — **recommended**, registers via proxmod's supported
-  extension mechanism.
-* [`pve-csi-copy`](../hack/pve-token-copy/) with `--token-copy-endpoint` — the
-  original self-contained hack, still supported.
 
 `--proxmod-endpoint` wins if both are given. Per-cluster overrides
 (`proxmod_endpoint` / `token_copy_endpoint`) let a mixed fleet use different
@@ -358,7 +373,7 @@ persistentvolumeclaim/storage-test-1   Bound    pvc-e248bc56-dcf4-4145-93b9-a374
 
 Evacuate all CSI volumes from a Proxmox node (zone), e.g. before node maintenance.
 
-By default, evacuate stamps `proxmox.crunchymonkies.com/migrate-node` annotations on the affected PVCs and lets the [migration controller](migration-controller.md) execute them one at a time (the legacy `csi.proxmox.sinextra.dev/*` annotation keys remain accepted for compatibility). With `--now` it runs the migrations synchronously (requires root credentials in the config, like `migrate`).
+By default, evacuate stamps `proxmox.crunchymonkies.com/migrate-node` annotations on the affected PVCs and lets the [migration controller](migration-controller.md) execute them one at a time (the legacy `csi.proxmox.sinextra.dev/*` annotation keys remain accepted for compatibility). With `--now` it runs the migrations synchronously (needs copy-capable credentials in the config, like `migrate`).
 
 Target selection understands per-zone storage names: a zone hosting the volume's own storage name is preferred, but on clusters where every zone has its own storage the candidates come from the storages named by the driver's StorageClasses (the cluster-default class first). When the chosen — or explicitly `--target`ed — zone does not host the source storage name, evacuate also stamps `migrate-storage` (or passes the target storage in `--now` mode).
 

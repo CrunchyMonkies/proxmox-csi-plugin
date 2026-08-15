@@ -125,6 +125,14 @@ controller:
   # ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
   podLabels: {}
 
+  # -- Write the resolved Proxmox VMID back to each node as a
+  # `proxmox.crunchymonkies.com/instance-id` annotation, so later lookups read the
+  # annotation instead of scanning every VM in the cluster. Also grants the
+  # controller `patch` on nodes.
+  # Only has an effect where the providerID carries no VMID — notably rke2, whose
+  # `rke2://<name>` is immutable. Leave off if a CCM already sets the providerID.
+  annotateNodeInstanceID: false
+
   plugin:
     # -- Controller CSI Driver.
     image:
@@ -384,7 +392,9 @@ extraVolumeMounts: []
 # -- Volume migration controller (pvecsictl controller).
 # Watches PVCs for proxmox.crunchymonkies.com/migrate-node annotations and Nodes
 # for proxmox.crunchymonkies.com/evacuate annotations, and migrates the backing
-# Proxmox disks automatically. Requires Proxmox root credentials.
+# Proxmox disks automatically. Authenticates with a scoped API token where the
+# Proxmox nodes carry a permission-gated copy endpoint (`proxmod_endpoint: true`),
+# and with root@pam otherwise.
 migrator:
   # -- Enable the migration controller deployment.
   enabled: false

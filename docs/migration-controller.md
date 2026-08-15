@@ -17,7 +17,7 @@ flowchart LR
         q[workqueue] --> mig[pkg/migrator pipeline]
     end
     producers -- "migrate-node / migrate-storage" --> q
-    mig -- "move disk + rewire PV" --> pve[(Proxmox API, root@pam)]
+    mig -- "move disk + rewire PV" --> pve[(Proxmox API)]
     mig -- "phases + events" --> pvc[PVC annotations & events]
 ```
 
@@ -34,12 +34,14 @@ pvecsictl controller --config=/etc/proxmox/config.yaml
 ### Prerequisites
 
 - **Proxmox credentials** in the migrator's cloud config, one of:
-  - **`root@pam` username/password** (default). The built-in disk-copy endpoint has no permission check and is therefore root-only, so the migrator needs root. Keep these in a **dedicated secret**, separate from the CSI controller's token config, so the least-privileged component never holds root.
   - **A scoped API token** with `--proxmod-endpoint` **(recommended)** or `--token-copy-endpoint`. Both install a permission-gated copy endpoint on the Proxmox nodes and are authorized identically — `Datastore.Audit` on the source + `Datastore.AllocateSpace` on the target — so no `root@pam` credential is needed. They differ only in how the endpoint gets into `pvedaemon`:
     - `--proxmod-endpoint` → the [`proxmox-csi-storage`](../hack/proxmod-csi-storage/) package (`POST /nodes/{node}/proxmod/csi-storage/copy`), which registers through [proxmod](https://github.com/CrunchyMonkies/proxmod)'s supported extension mechanism. It also needs the `proxmod` package itself. Recommended: proxmod owns the injection, and the endpoint lives in an isolated subtree where a collision with a PVE-owned route is structurally impossible.
     - `--token-copy-endpoint` → the [`pve-csi-copy`](../hack/pve-token-copy/) package (`POST /nodes/{node}/storage/{storage}/csi-copy`), a self-contained hack that rewrites `pvedaemon`/`pveproxy`'s `ExecStart` itself. Still supported and unmodified.
 
     Both are per-process flags; for a mixed fleet override them per cluster with `proxmod_endpoint: true` / `token_copy_endpoint: true` in the cloud-config, so clusters without the package keep the built-in path. **If both resolve true for a cluster, proxmod wins.** Whichever you pick, the token must also carry the privileges the rest of the migration uses: `VM.Audit` (read VM config during detach/helper lookup), `VM.Allocate` + `VM.Config.Disk` (the qcow2/vmdk helper-VM conversion), and `Datastore.Allocate` (partial-file and helper-disk cleanup). This is a real improvement over root@pam (no shell, ACL-path-scopeable) but still a **powerful** grant — `Datastore.Allocate` can delete any volume on that storage. Provide **only** the token (omit `username`/`password`): the client uses username/password when both are present, so leaving them in silently keeps you on root@pam. See [hack/proxmod-csi-storage/README.md](../hack/proxmod-csi-storage/README.md) and [hack/pve-token-copy/README.md](../hack/pve-token-copy/README.md).
+
+    **Pass the flag, not only the config key.** The per-cluster overrides work at copy time but the startup credential check does not read them, so a token-only config without the flag exits with `cluster <region>: requires a Proxmox root account`. Set `migrator.extraArgs: ["--proxmod-endpoint"]` in the chart until [#24](https://github.com/CrunchyMonkies/proxmox-csi-plugin/issues/24) is fixed.
+  - **`root@pam` username/password** (fallback, for nodes without either package). Proxmox' built-in disk-copy endpoint has no permission check and is therefore root-only. Keep these in a **dedicated secret**, separate from the CSI controller's token config, so the least-privileged component never holds root.
 - Nodes labelled with `topology.kubernetes.io/region` / `zone` (or the `topology.proxmox.crunchymonkies.com/*` equivalents; the legacy `topology.proxmox.sinextra.dev/*` labels from the upstream Proxmox CCM are still read). Node-to-VMID resolution needs **no extra setup**: if the node has a `proxmox://<region>/<vmid>` providerID (Proxmox CCM) or the `proxmox.crunchymonkies.com/instance-id` annotation (legacy `proxmox.sinextra.dev/instance-id` still read), that value is used; otherwise — e.g. a foreign providerID such as `rke2://…` on a cluster without the Proxmox CCM — the migrator resolves the VM from the Proxmox API the same way the CSI controller does: the VM whose name starts with the node name **and** whose SMBIOS UUID matches the node's system UUID, then by system UUID alone if no VM name matches. A VM found in a different region than the volume is rejected. The annotation remains an explicit override for setups the lookup cannot verify (e.g. nodes that report no system UUID).
 - A **free Proxmox VM ID** for the transient conversion helper (`migrator.helperVMID`, default `9998`). It must not belong to a real VM and must differ from the controller VMID that owns the CSI disks.
 
@@ -53,14 +55,22 @@ migrator:
     clusters:
       - url: https://cluster-api-1.example.com:8006/api2/json
         insecure: false
-        username: root@pam
-        password: "strong-password"
+        # Token only — adding username/password here would silently override it.
+        token_id: "kubernetes-csi@pve!csi"
+        token_secret: "secret"
         region: cluster-1
+        proxmod_endpoint: true
         # optional: preferred storage per node, used when the source storage
         # name does not exist on a pod-follow target node
         primary_storage:
           pve-3: local-zfs
+  # See #24: the startup check reads the flag, not proxmod_endpoint.
+  extraArgs:
+    - --proxmod-endpoint
 ```
+
+For a fleet without the copy-endpoint package, replace the token pair and
+`proxmod_endpoint` with `username: root@pam` / `password:` and drop the `extraArgs`.
 
 ```shell
 helm upgrade -i --namespace=csi-proxmox -f values.yaml \
@@ -208,7 +218,7 @@ This gate applies **only to the reactive auto-trigger**: explicit `migrate-node`
 
 | Flag | Default | Description |
 |---|---|---|
-| `--config` | (required) | Proxmox cloud config with root credentials |
+| `--config` | (required) | Proxmox cloud config with the migrator credentials (scoped token, or root@pam without a copy endpoint) |
 | `--leader-election` | `true` | Use a `pvecsictl-migrator` Lease |
 | `--pod-follow` | `false` | Migrate volumes automatically when all their pods moved to another zone |
 | `--reactive-evacuation` | `false` | Migrate a volume when its pod is unschedulable because the volume is pinned to a cordoned/tainted node (makes `kubectl drain` transparent) |
@@ -294,7 +304,7 @@ Tested against **Proxmox VE 9.2.3** (`pve-manager/9.2.3`, `libpve-storage-perl 9
 | # | Type | Finding |
 |---|---|---|
 | 1 | **Bug** | `volume_export` of a qcow2/vmdk dir-storage volume as `raw+size` runs `qemu-img convert -O raw <file> /dev/stdout`, which fails with `Cannot grow device files` (qemu refuses raw output to a non-seekable pipe). qcow2 volumes **cannot be streamed** by `storage_migrate` without snapshots. Proxmox knows: `QemuMigrate.pm` (~line 461) comments *"on-the-fly conversion from qcow2 to raw+size back to qcow2 is currently not possible"* and forces `with_snapshots=1` for qcow2/vmdk during VM migration — but that flag is internal. |
-| 2 | **Limitation** | The volume copy endpoint (`POST /nodes/{node}/storage/{storage}/content/{volume}`, `Content.pm` `name => 'copy'`) is marked *"experimental code - do not use"* upstream and exposes only `volume`/`target`/`target_node` — no format or snapshot parameters, so caveat #1 cannot be worked around through it. It is also a **copy**: the source file remains and must be cleaned up separately (the migrator reclaims it after the target is verified and bound, since the `Retain` guard stops the provisioner from doing so). It additionally has **no `permissions` block**, so PVE restricts it to `root@pam` — the reason the migrator needs root by default. Two optional packages register a permission-gated equivalent that takes the same parameters but is authorized by ACL, letting the migrator use a scoped token: [`proxmox-csi-storage`](../hack/proxmod-csi-storage/) (`POST .../proxmod/csi-storage/copy`, via proxmod's extension mechanism — `--proxmod-endpoint`, recommended), and [`pve-csi-copy`](../hack/pve-token-copy/) (`POST .../storage/{storage}/csi-copy` — `--token-copy-endpoint`). Neither can live under `content/`, whose greedy `{volume}` path parameter swallows any fixed sub-path; `pve-csi-copy` sidesteps that by mounting one level up and taking the source volume as a body parameter, while the proxmod extension is outside the `content/` subtree entirely. The **CSI controller's snapshot path uses the same endpoint** and picks it up from the same per-cluster `proxmod_endpoint` / `token_copy_endpoint` settings — see [`docs/volumesnapshot.md`](volumesnapshot.md), which also notes the minimum package versions directory storage needs. |
+| 2 | **Limitation** | The volume copy endpoint (`POST /nodes/{node}/storage/{storage}/content/{volume}`, `Content.pm` `name => 'copy'`) is marked *"experimental code - do not use"* upstream and exposes only `volume`/`target`/`target_node` — no format or snapshot parameters, so caveat #1 cannot be worked around through it. It is also a **copy**: the source file remains and must be cleaned up separately (the migrator reclaims it after the target is verified and bound, since the `Retain` guard stops the provisioner from doing so). It additionally has **no `permissions` block**, so PVE restricts it to `root@pam` — the reason the migrator needs root wherever no copy endpoint is installed. Two optional packages register a permission-gated equivalent that takes the same parameters but is authorized by ACL, letting the migrator use a scoped token: [`proxmox-csi-storage`](../hack/proxmod-csi-storage/) (`POST .../proxmod/csi-storage/copy`, via proxmod's extension mechanism — `--proxmod-endpoint`, recommended), and [`pve-csi-copy`](../hack/pve-token-copy/) (`POST .../storage/{storage}/csi-copy` — `--token-copy-endpoint`). Neither can live under `content/`, whose greedy `{volume}` path parameter swallows any fixed sub-path; `pve-csi-copy` sidesteps that by mounting one level up and taking the source volume as a body parameter, while the proxmod extension is outside the `content/` subtree entirely. The **CSI controller's snapshot path uses the same endpoint** and picks it up from the same per-cluster `proxmod_endpoint` / `token_copy_endpoint` settings — see [`docs/volumesnapshot.md`](volumesnapshot.md), which also notes the minimum package versions directory storage needs. |
 | 3 | **Limitation** | `volume_import` on dir storage without snapshots accepts only `raw+size`, and dies importing it into a `.qcow2`-named target (`Plugin.pm` ~2228: *"cannot import format raw+size into a file of format qcow2"*). This forces the `.raw` rename for converted volumes. |
 | 4 | **Trap** | Removing an `unusedN` config entry (`PUT config delete=unusedN`) **frees the volume's data** when the VM owns it (`try_deallocate_drive`); `qm destroy` frees every owned volume referenced in the config, including `unusedN`. There is no API to drop an owned reference while keeping the data. Foreign (non-owned) references are dropped without freeing — the asymmetry the helper-VM design depends on. |
 | 5 | **Trap** | `qm migrate` dies on any attached local disk owned by a different VM (`QemuMigrate.pm` ~477) with no override, ruling out a simple "attach to a scratch VM and migrate" approach. |

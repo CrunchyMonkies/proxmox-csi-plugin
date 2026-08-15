@@ -34,7 +34,13 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["nodes"]
+    {{- if .Values.controller.annotateNodeInstanceID }}
+    # patch is only granted when the driver is asked to write the instance-id
+    # annotation back; see controller.annotateNodeInstanceID.
+    verbs: ["get", "list", "watch", "patch"]
+    {{- else }}
     verbs: ["get", "list", "watch"]
+    {{- end }}
 
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattachments"]

@@ -1,6 +1,6 @@
 # proxmox-csi-plugin
 
-![Version: 0.12.2](https://img.shields.io/badge/Version-0.12.2-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.4.2](https://img.shields.io/badge/AppVersion-v0.20.0--1.4.2-informational?style=flat-square)
+![Version: 0.13.0](https://img.shields.io/badge/Version-0.13.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.4.2](https://img.shields.io/badge/AppVersion-v0.20.0--1.4.2-informational?style=flat-square)
 
 Container Storage Interface plugin for Proxmox
 
@@ -118,6 +118,7 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | storageClass | list | `[]` | Storage class definition. |
 | controller.podAnnotations | object | `{}` | Annotations for controller pod. ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/ |
 | controller.podLabels | object | `{}` | Labels for controller pod. ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/ |
+| controller.annotateNodeInstanceID | bool | `false` | Write the resolved Proxmox VMID back to each node as a `proxmox.crunchymonkies.com/instance-id` annotation, so later lookups read the annotation instead of scanning every VM in the cluster. Also grants the controller `patch` on nodes. Only has an effect where the providerID carries no VMID — notably rke2, whose `rke2://<name>` is immutable. Leave off if a CCM already sets the providerID. |
 | controller.plugin.image | object | `{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/proxmox-csi-controller","tag":""}` | Controller CSI Driver. |
 | controller.plugin.resources | object | `{"requests":{"cpu":"10m","memory":"16Mi"}}` | Controller resource requests and limits. ref: https://kubernetes.io/docs/user-guide/compute-resources/ |
 | controller.attacher.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-attacher","tag":"v4.10.0"}` | CSI Attacher. ref: https://github.com/kubernetes-csi/external-attacher |
@@ -163,7 +164,7 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | affinity | object | `{}` | Affinity for controller assignment. ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity |
 | extraVolumes | list | `[]` | Additional volumes for Pods |
 | extraVolumeMounts | list | `[]` |  |
-| migrator | object | `{"config":{"clusters":[]},"detachTimeout":"5m","drainTimeout":"10m","enabled":false,"existingConfigSecret":null,"existingConfigSecretKey":"config.yaml","extraArgs":[],"helperVMID":9998,"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/pvecsictl","tag":""},"leaderElection":true,"maxAttempts":5,"metrics":{"enabled":false,"port":8081},"podFollow":false,"reactiveEvacuation":{"enabled":false,"grace":"2m"},"rebalance":{"enabled":false,"extraArgs":[],"highThreshold":0.8,"lowThreshold":0.6,"maxMigrations":2,"schedule":"0 3 * * *","window":"","windowTz":"UTC"},"replicaCount":1,"resources":{"requests":{"cpu":"10m","memory":"32Mi"}},"taskTimeout":10800}` | Volume migration controller (pvecsictl controller). Watches PVCs for proxmox.crunchymonkies.com/migrate-node annotations and Nodes for proxmox.crunchymonkies.com/evacuate annotations, and migrates the backing Proxmox disks automatically. Requires Proxmox root credentials. |
+| migrator | object | `{"config":{"clusters":[]},"detachTimeout":"5m","drainTimeout":"10m","enabled":false,"existingConfigSecret":null,"existingConfigSecretKey":"config.yaml","extraArgs":[],"helperVMID":9998,"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/pvecsictl","tag":""},"leaderElection":true,"maxAttempts":5,"metrics":{"enabled":false,"port":8081},"podFollow":false,"reactiveEvacuation":{"enabled":false,"grace":"2m"},"rebalance":{"enabled":false,"extraArgs":[],"highThreshold":0.8,"lowThreshold":0.6,"maxMigrations":2,"schedule":"0 3 * * *","window":"","windowTz":"UTC"},"replicaCount":1,"resources":{"requests":{"cpu":"10m","memory":"32Mi"}},"taskTimeout":10800}` | Volume migration controller (pvecsictl controller). Watches PVCs for proxmox.crunchymonkies.com/migrate-node annotations and Nodes for proxmox.crunchymonkies.com/evacuate annotations, and migrates the backing Proxmox disks automatically. Authenticates with a scoped API token where the Proxmox nodes carry a permission-gated copy endpoint (`proxmod_endpoint: true`), and with root@pam otherwise. |
 | migrator.enabled | bool | `false` | Enable the migration controller deployment. |
 | migrator.replicaCount | int | `1` | Number of replicas; leader election ensures only one acts. |
 | migrator.image.repository | string | `"ghcr.io/crunchymonkies/pvecsictl"` | Migrator (pvecsictl) image. |

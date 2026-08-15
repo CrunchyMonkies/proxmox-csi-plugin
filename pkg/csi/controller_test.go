@@ -119,6 +119,31 @@ func (ts *baseCSITestSuite) setupTestSuite(config string) error {
 					},
 				},
 			},
+			{
+				// A node whose providerID carries no VMID, which is what rke2 leaves
+				// behind: rke2://<name>, and immutable, so no CCM can improve on it.
+				// The driver has to fall back to matching the SMBIOS UUID against
+				// every VM in the cluster — here that resolves to VM 100 — and this
+				// is the only node the instance-id write-back has anything to do.
+				//
+				// The name is a prefix of the VM's name, which is what FindVMByNode
+				// filters on before it compares UUIDs.
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "Node",
+					APIVersion: "v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "cluster-1-node",
+				},
+				Spec: corev1.NodeSpec{
+					ProviderID: "rke2://cluster-1-node",
+				},
+				Status: corev1.NodeStatus{
+					NodeInfo: corev1.NodeSystemInfo{
+						SystemUUID: "11833f4c-341f-4bd3-aad7-f7abed000000",
+					},
+				},
+			},
 		},
 	}
 
@@ -972,6 +997,92 @@ func (ts *configuredTestSuite) TestControllerPublishVolumeSurvivesFlakyAPI() {
 	ts.Require().Len(testcluster.AttachRequests(), 1)
 }
 
+// TestControllerPublishVolumeAnnotatesNodeInstanceID: the write-back exists for
+// clusters whose providerID cannot carry a VMID — rke2 writes an immutable
+// rke2://<name> — where the driver otherwise re-runs a scan of every VM in the
+// cluster on every attach and every detach, forever.
+func (ts *configuredTestSuite) TestControllerPublishVolumeAnnotatesNodeInstanceID() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	ts.s.AnnotateNodeInstanceID = true
+
+	resp, err := ts.publishVolumeOnNode("cluster-1-node")
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+
+	node, err := ts.kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node", metav1.GetOptions{})
+	ts.Require().NoError(err)
+	ts.Require().Equal("100", node.Annotations[csi.AnnotationProxmoxInstanceID])
+}
+
+// TestControllerPublishVolumeAnnotatesNodeInstanceIDOnce: the annotation is only
+// worth writing if it is then read, so the second attach must resolve the VMID
+// from it and never reach the scan — or the write-back has bought nothing.
+func (ts *configuredTestSuite) TestControllerPublishVolumeAnnotatesNodeInstanceIDOnce() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	ts.s.AnnotateNodeInstanceID = true
+
+	patches := 0
+
+	ts.kclient.PrependReactor("patch", "nodes",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			patches++
+
+			return false, nil, nil
+		})
+
+	for range 2 {
+		resp, err := ts.publishVolumeOnNode("cluster-1-node")
+		ts.Require().NoError(err)
+		ts.Require().NotNil(resp)
+	}
+
+	ts.Require().Equal(1, patches)
+}
+
+// TestControllerPublishVolumeIgnoresNodeInstanceIDByDefault: the write-back needs
+// patch on nodes, so it stays off until it is asked for.
+func (ts *configuredTestSuite) TestControllerPublishVolumeIgnoresNodeInstanceIDByDefault() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	resp, err := ts.publishVolumeOnNode("cluster-1-node")
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+
+	node, err := ts.kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node", metav1.GetOptions{})
+	ts.Require().NoError(err)
+	ts.Require().NotContains(node.Annotations, csi.AnnotationProxmoxInstanceID)
+}
+
+// TestControllerPublishVolumeSurvivesNodeAnnotationFailure: the VMID is already
+// resolved by the time the annotation is written, so a controller without patch
+// on nodes must lose the optimisation and nothing else. Turning a denied patch
+// into a failed attach would make the flag strictly worse than leaving it off.
+func (ts *configuredTestSuite) TestControllerPublishVolumeSurvivesNodeAnnotationFailure() {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset() //nolint: wsl_v5
+
+	ts.s.AnnotateNodeInstanceID = true
+
+	ts.kclient.PrependReactor("patch", "nodes",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, fmt.Errorf("nodes is forbidden: cannot patch resource")
+		})
+
+	resp, err := ts.publishVolumeOnNode("cluster-1-node")
+	ts.Require().NoError(err)
+	ts.Require().NotNil(resp)
+	ts.Require().Len(testcluster.AttachRequests(), 1)
+
+	node, err := ts.kclient.CoreV1().Nodes().Get(context.Background(), "cluster-1-node", metav1.GetOptions{})
+	ts.Require().NoError(err)
+	ts.Require().NotContains(node.Annotations, csi.AnnotationProxmoxInstanceID)
+}
+
 // TestControllerUnpublishVolumeEventsFailedRenameBack: a volume left on the
 // target VM's name is still resolved by suffix and adopted on its next attach,
 // so the detach succeeds — but until then the PV's volumeHandle names something
@@ -1571,8 +1682,14 @@ func (ts *configuredTestSuite) TestControllerGetVolume() {
 // publishVolume attaches the claim-bound scratch volume to VM 100, which is the
 // attach the reassignment rename runs under on the configs that enable it.
 func (ts *configuredTestSuite) publishVolume() (*proto.ControllerPublishVolumeResponse, error) {
+	return ts.publishVolumeOnNode("cluster-1-node-1")
+}
+
+// publishVolumeOnNode is publishVolume against a named node, for the tests that
+// care which node resolution path the attach takes.
+func (ts *configuredTestSuite) publishVolumeOnNode(nodeID string) (*proto.ControllerPublishVolumeResponse, error) {
 	return ts.s.ControllerPublishVolume(context.Background(), &proto.ControllerPublishVolumeRequest{
-		NodeId:   "cluster-1-node-1",
+		NodeId:   nodeID,
 		VolumeId: "cluster-1/pve-1/local-lvm/vm-9999-pvc-unpublished",
 		VolumeCapability: &proto.VolumeCapability{
 			AccessMode: &proto.VolumeCapability_AccessMode{
