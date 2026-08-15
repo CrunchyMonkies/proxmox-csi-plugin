@@ -34,13 +34,13 @@ pvecsictl controller --config=/etc/proxmox/config.yaml
 ### Prerequisites
 
 - **Proxmox credentials** in the migrator's cloud config, one of:
-  - **A scoped API token** with `--proxmod-endpoint` **(recommended)** or `--token-copy-endpoint`. Both install a permission-gated copy endpoint on the Proxmox nodes and are authorized identically — `Datastore.Audit` on the source + `Datastore.AllocateSpace` on the target — so no `root@pam` credential is needed. They differ only in how the endpoint gets into `pvedaemon`:
+  - **A scoped API token** with the proxmod copy endpoint **(recommended)** or the pve-csi-copy one — `proxmod_endpoint: true` / `token_copy_endpoint: true` per cluster, or `--proxmod-endpoint` / `--token-copy-endpoint` fleet-wide. Both install a permission-gated copy endpoint on the Proxmox nodes and are authorized identically — `Datastore.Audit` on the source + `Datastore.AllocateSpace` on the target — so no `root@pam` credential is needed. They differ only in how the endpoint gets into `pvedaemon`:
     - `--proxmod-endpoint` → the [`proxmox-csi-storage`](../hack/proxmod-csi-storage/) package (`POST /nodes/{node}/proxmod/csi-storage/copy`), which registers through [proxmod](https://github.com/CrunchyMonkies/proxmod)'s supported extension mechanism. It also needs the `proxmod` package itself. Recommended: proxmod owns the injection, and the endpoint lives in an isolated subtree where a collision with a PVE-owned route is structurally impossible.
     - `--token-copy-endpoint` → the [`pve-csi-copy`](../hack/pve-token-copy/) package (`POST /nodes/{node}/storage/{storage}/csi-copy`), a self-contained hack that rewrites `pvedaemon`/`pveproxy`'s `ExecStart` itself. Still supported and unmodified.
 
     Both are per-process flags; for a mixed fleet override them per cluster with `proxmod_endpoint: true` / `token_copy_endpoint: true` in the cloud-config, so clusters without the package keep the built-in path. **If both resolve true for a cluster, proxmod wins.** Whichever you pick, the token must also carry the privileges the rest of the migration uses: `VM.Audit` (read VM config during detach/helper lookup), `VM.Allocate` + `VM.Config.Disk` (the qcow2/vmdk helper-VM conversion), and `Datastore.Allocate` (partial-file and helper-disk cleanup). This is a real improvement over root@pam (no shell, ACL-path-scopeable) but still a **powerful** grant — `Datastore.Allocate` can delete any volume on that storage. Provide **only** the token (omit `username`/`password`): the client uses username/password when both are present, so leaving them in silently keeps you on root@pam. See [hack/proxmod-csi-storage/README.md](../hack/proxmod-csi-storage/README.md) and [hack/pve-token-copy/README.md](../hack/pve-token-copy/README.md).
 
-    **Pass the flag, not only the config key.** The per-cluster overrides work at copy time but the startup credential check does not read them, so a token-only config without the flag exits with `cluster <region>: requires a Proxmox root account`. Set `migrator.extraArgs: ["--proxmod-endpoint"]` in the chart until [#24](https://github.com/CrunchyMonkies/proxmox-csi-plugin/issues/24) is fixed.
+    **The config key is enough.** The per-cluster override drives both the copy and the startup credential check, so a token-only config carrying `proxmod_endpoint: true` needs no flag. A fleet running the same endpoint everywhere can set `migrator.proxmodEndpoint: true` (or `migrator.tokenCopyEndpoint: true`) in the chart instead of repeating the key per cluster.
   - **`root@pam` username/password** (fallback, for nodes without either package). Proxmox' built-in disk-copy endpoint has no permission check and is therefore root-only. Keep these in a **dedicated secret**, separate from the CSI controller's token config, so the least-privileged component never holds root.
 - Nodes labelled with `topology.kubernetes.io/region` / `zone` (or the `topology.proxmox.crunchymonkies.com/*` equivalents; the legacy `topology.proxmox.sinextra.dev/*` labels from the upstream Proxmox CCM are still read). Node-to-VMID resolution needs **no extra setup**: if the node has a `proxmox://<region>/<vmid>` providerID (Proxmox CCM) or the `proxmox.crunchymonkies.com/instance-id` annotation (legacy `proxmox.sinextra.dev/instance-id` still read), that value is used; otherwise — e.g. a foreign providerID such as `rke2://…` on a cluster without the Proxmox CCM — the migrator resolves the VM from the Proxmox API the same way the CSI controller does: the VM whose name starts with the node name **and** whose SMBIOS UUID matches the node's system UUID, then by system UUID alone if no VM name matches. A VM found in a different region than the volume is rejected. The annotation remains an explicit override for setups the lookup cannot verify (e.g. nodes that report no system UUID).
 - A **free Proxmox VM ID** for the transient conversion helper (`migrator.helperVMID`, default `9998`). It must not belong to a real VM and must differ from the controller VMID that owns the CSI disks.
@@ -64,13 +64,10 @@ migrator:
         # name does not exist on a pod-follow target node
         primary_storage:
           pve-3: local-zfs
-  # See #24: the startup check reads the flag, not proxmod_endpoint.
-  extraArgs:
-    - --proxmod-endpoint
 ```
 
 For a fleet without the copy-endpoint package, replace the token pair and
-`proxmod_endpoint` with `username: root@pam` / `password:` and drop the `extraArgs`.
+`proxmod_endpoint` with `username: root@pam` / `password:`.
 
 ```shell
 helm upgrade -i --namespace=csi-proxmox -f values.yaml \
