@@ -124,7 +124,7 @@ func getVMByAttachedVolume(ctx context.Context, cl *goproxmox.APIClient, vol *vo
 			return false, nil
 		}
 
-		vm, err := cl.GetVMConfig(ctx, int(rs.VMID))
+		vm, err := pxpool.GetVMConfigByResource(ctx, cl, rs)
 		if err != nil {
 			return false, err
 		}

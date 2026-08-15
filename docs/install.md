@@ -358,3 +358,46 @@ cluster:
       - https://raw.githubusercontent.com/sergelogvinov/proxmox-cloud-controller-manager/main/docs/deploy/cloud-controller-manager.yml
       - https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
 ```
+
+## Troubleshooting
+
+### `unexpected end of JSON input` (fork)
+
+```text
+failed to get vm by attached volume :: unexpected end of JSON input
+```
+
+This message means the Proxmox API answered with an empty body, and the client library reported the
+failed JSON decode rather than the HTTP status — the status code was discarded, so the log never said
+what Proxmox had actually replied. An empty body is what `pveproxy` returns for its own errors
+(`595 no route to host`, `596 connection error`, `599 too many redirections`), which it raises when it
+cannot reach `pvedaemon` on the target node — typically during an API restart or under a burst of
+concurrent requests.
+
+Since `v0.20.0-1.4.1` the driver:
+
+* retries idempotent `GET` requests three times with a short backoff, so a single bad answer no longer
+  fails the whole volume operation. Writes (disk copy, rename, config change, content delete) are
+  **never** replayed;
+* reports the real status line, so the same failure now reads `596 Connection error` instead of
+  `unexpected end of JSON input`;
+* bounds every API call with a 90 s client timeout — previously the secure path used
+  `http.DefaultClient`, which has no timeout at all;
+* issues one `GET` per VM in the node scan loops instead of three.
+
+Retries are counted, and are the earliest signal that a Proxmox endpoint is degrading:
+
+```shell
+kubectl -n csi-proxmox port-forward deploy/proxmox-csi-plugin-controller 8080:8080
+curl -s localhost:8080/metrics | grep proxmox_api_request_retries_total
+```
+
+```text
+proxmox_api_request_retries_total{method="GET",outcome="596"} 4
+proxmox_api_request_retries_total{method="GET",outcome="empty-body"} 1
+```
+
+`outcome` is the HTTP status that provoked the retry, or `empty-body`, `timeout` or `transport-error`
+when there was no usable response. A non-zero counter with no accompanying errors means the fragility
+is being absorbed. A rising `proxmox_api_request_errors_total` alongside it means the retries are not
+enough — check `pveproxy`/`pvedaemon` on the node named in the log.
