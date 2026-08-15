@@ -254,21 +254,13 @@ migrator:
   # Transient helper VM used to convert qcow2/vmdk volumes to raw before moving.
   # Must be a free VMID and differ from the controller VMID (default 9999).
   helperVMID: 9998
-  # Required alongside proxmod_endpoint until #24 is fixed: the startup credential
-  # check reads only the flag, so a token-only config is rejected without it.
-  extraArgs:
-    - --proxmod-endpoint
+  # A uniform fleet can set the endpoint once here instead of per cluster:
+  # proxmodEndpoint: true
   # Optional scheduled rebalance CronJob:
   rebalance:
     enabled: false
     schedule: "0 3 * * *"
 ```
-
-> **Note.** `proxmod_endpoint: true` in the config is not currently enough on its own. The
-> migrator's startup check reads only the global `--proxmod-endpoint` flag, so a token-only config
-> exits with `requires a Proxmox root account` before it ever reaches the copy path — hence the
-> `extraArgs` above. Tracked in
-> [#24](https://github.com/CrunchyMonkies/proxmox-csi-plugin/issues/24).
 
 Omit `username` and `password` entirely. The client prefers username/password whenever both are
 present, so leaving them beside a token silently puts you back on `root@pam`.
