@@ -54,6 +54,12 @@ spec:
             {{- if not .Values.migrator.leaderElection }}
             - "--leader-election=false"
             {{- end }}
+            {{- if .Values.migrator.proxmodEndpoint }}
+            - "--proxmod-endpoint"
+            {{- end }}
+            {{- if .Values.migrator.tokenCopyEndpoint }}
+            - "--token-copy-endpoint"
+            {{- end }}
             {{- if .Values.migrator.podFollow }}
             - "--pod-follow"
             {{- end }}
