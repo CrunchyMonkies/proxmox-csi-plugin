@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	proxmox "github.com/luthermonson/go-proxmox"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -154,6 +155,23 @@ func TestAPITransportSurfacesSwallowedStatus(t *testing.T) {
 			statusText: "403",
 		},
 		{
+			// PVE answers an unauthenticated request with 401 and nothing else.
+			// Client.Req reads that status to decide to create a session, so
+			// rewriting it breaks ticket authentication outright.
+			msg:        "an empty 401 still reads as 401, so the library can log in",
+			status:     http.StatusUnauthorized,
+			body:       "",
+			expected:   http.StatusUnauthorized,
+			statusText: "401",
+		},
+		{
+			msg:        "an empty 403 is left alone for the same reason",
+			status:     http.StatusForbidden,
+			body:       "",
+			expected:   http.StatusForbidden,
+			statusText: "403",
+		},
+		{
 			msg:        "500 is already handled by the library",
 			status:     http.StatusInternalServerError,
 			body:       "",
@@ -251,6 +269,52 @@ func TestAPITransportRetriesTransportErrors(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 	assert.Equal(t, int32(2), hits.Load())
+}
+
+// TestAPITransportTicketAuth drives a real client through the transport, because
+// the shape of this failure is not visible in a status code on its own: the
+// migrator authenticates with a username and password, and Client.Req only knows
+// to create a session because the first request comes back 401. Rewriting that
+// status left every credentials-based login failing with "401 No ticket" while
+// token authentication, which never sees a 401, stayed perfectly healthy.
+func TestAPITransportTicketAuth(t *testing.T) {
+	t.Parallel()
+
+	const ticket = "PVE:root@pam:0123ABCD"
+
+	var logins atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/api2/json/access/ticket" {
+			logins.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":{"ticket":"` + ticket + `","CSRFPreventionToken":"csrf","username":"root@pam"}}`)) //nolint:errcheck
+
+			return
+		}
+
+		// What PVE answers an unauthenticated request with: 401 and no body at
+		// all, which is exactly the shape describeStatus must not touch.
+		if c, err := req.Cookie("PVEAuthCookie"); err != nil || c.Value != ticket {
+			w.WriteHeader(http.StatusUnauthorized)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"version":"8.4"}}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	client := proxmox.NewClient(srv.URL+"/api2/json",
+		proxmox.WithHTTPClient(newAPIHTTPClient(false)),
+		proxmox.WithCredentials(&proxmox.Credentials{Username: "root@pam", Password: "secret"}),
+	)
+
+	version, err := client.Version(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "8.4", version.Version)
+	assert.Equal(t, int32(1), logins.Load(), "the 401 must reach the library so it logs in")
 }
 
 func TestNewAPIHTTPClient(t *testing.T) {
