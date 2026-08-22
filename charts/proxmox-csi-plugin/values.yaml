@@ -133,6 +133,20 @@ controller:
   # `rke2://<name>` is immutable. Leave off if a CCM already sets the providerID.
   annotateNodeInstanceID: false
 
+  # -- Run the controller pod in the host network namespace, so it reaches the
+  # Proxmox API as its node's own address rather than a pod address. Use where
+  # the hypervisor firewall trusts the node subnets but not the pod CIDR.
+  # Note: the ports below become host ports, and the scheduler does NOT account
+  # for a bare `containerPort` under hostNetwork — with `replicaCount` > 1, or a
+  # rolling update that surges, two pods can land on one node and fail to bind.
+  # Set `updateStrategy.rollingUpdate.maxSurge: 0` when enabling this.
+  hostNetwork: false
+
+  # -- DNS policy for the controller pod. Defaults to `ClusterFirstWithHostNet`
+  # when `hostNetwork` is on, because kubelet silently downgrades the usual
+  # `ClusterFirst` to the host's resolv.conf in the host network namespace.
+  dnsPolicy: ""
+
   plugin:
     # -- Controller CSI Driver.
     image:
@@ -401,6 +415,16 @@ migrator:
 
   # -- Number of replicas; leader election ensures only one acts.
   replicaCount: 1
+
+  # -- Run the migrator pod (and the rebalance CronJob) in the host network
+  # namespace. Same rationale as `controller.hostNetwork`: disk migration talks
+  # to the Proxmox API with root credentials, so it is the other workload that
+  # may need to arrive as the node.
+  hostNetwork: false
+
+  # -- DNS policy for the migrator pod. Defaults to `ClusterFirstWithHostNet`
+  # when `hostNetwork` is on.
+  dnsPolicy: ""
 
   image:
     # -- Migrator (pvecsictl) image.

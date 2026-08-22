@@ -39,6 +39,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       enableServiceLinks: false
+      {{- if .Values.controller.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: {{ .Values.controller.dnsPolicy | default "ClusterFirstWithHostNet" }}
+      {{- end }}
       serviceAccountName: {{ include "proxmox-csi-plugin.serviceAccountName" . }}-controller
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}

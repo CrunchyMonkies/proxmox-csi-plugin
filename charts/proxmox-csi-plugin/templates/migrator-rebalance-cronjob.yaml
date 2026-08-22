@@ -23,6 +23,10 @@ spec:
         spec:
           restartPolicy: Never
           enableServiceLinks: false
+          {{- if .Values.migrator.hostNetwork }}
+          hostNetwork: true
+          dnsPolicy: {{ .Values.migrator.dnsPolicy | default "ClusterFirstWithHostNet" }}
+          {{- end }}
           serviceAccountName: {{ include "proxmox-csi-plugin.serviceAccountName" . }}-migrator
           securityContext:
             {{- toYaml .Values.podSecurityContext | nindent 12 }}
