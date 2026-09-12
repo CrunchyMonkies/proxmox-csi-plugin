@@ -154,6 +154,13 @@ func TestNodeUnstageVolumeErrors(t *testing.T) {
 		expectedError error
 	}{
 		{
+			msg: "VolumeID",
+			request: &proto.NodeUnstageVolumeRequest{
+				StagingTargetPath: "/staging",
+			},
+			expectedError: fmt.Errorf("VolumeID must be provided"),
+		},
+		{
 			msg: "VolumePath",
 			request: &proto.NodeUnstageVolumeRequest{
 				VolumeId: "pvc-1",

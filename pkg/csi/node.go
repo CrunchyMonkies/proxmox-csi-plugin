@@ -23,7 +23,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -44,6 +43,7 @@ import (
 	"k8s.io/klog/v2"
 	mountutil "k8s.io/mount-utils"
 	"k8s.io/utils/exec"
+	"k8s.io/utils/keymutex"
 	utilpath "k8s.io/utils/path"
 )
 
@@ -73,16 +73,23 @@ type NodeService struct {
 	nodeID  string
 	kclient kubernetes.Interface
 
-	Mount       mount.IMount
-	volumeLocks sync.Mutex
+	Mount mount.IMount
+
+	// volumeLocks serializes stage/unstage of the SAME volume only. A single node-wide
+	// mutex here used to make every volume on the node wait behind one slow mkfs or
+	// fstrim — and on a throttled Proxmox disk those take size / diskMBps (see
+	// collectFormatOptions and NodeUnstageVolume). 64 hashed buckets, comfortably more
+	// than VolumesPerNodeHardLimit, so unrelated volumes practically never share one.
+	volumeLocks keymutex.KeyMutex
 }
 
 // NewNodeService returns a new NodeService
 func NewNodeService(nodeID string, clientSet kubernetes.Interface) *NodeService {
 	return &NodeService{
-		nodeID:  nodeID,
-		kclient: clientSet,
-		Mount:   mount.GetMountProvider(),
+		nodeID:      nodeID,
+		kclient:     clientSet,
+		Mount:       mount.GetMountProvider(),
+		volumeLocks: keymutex.NewHashed(64),
 	}
 }
 
@@ -132,8 +139,8 @@ func (n *NodeService) NodeStageVolume(_ context.Context, request *csi.NodeStageV
 
 	klog.V(5).InfoS("NodeStageVolume: mount device", "device", devicePath, "path", stagingTarget)
 
-	n.volumeLocks.Lock()
-	defer n.volumeLocks.Unlock()
+	n.volumeLocks.LockKey(volumeID)
+	defer n.volumeLocks.UnlockKey(volumeID) //nolint:errcheck
 
 	m := n.Mount
 
@@ -242,6 +249,11 @@ func (n *NodeService) NodeStageVolume(_ context.Context, request *csi.NodeStageV
 func (n *NodeService) NodeUnstageVolume(_ context.Context, request *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
 	klog.V(4).InfoS("NodeUnstageVolume: called", "args", protosanitizer.StripSecrets(request))
 
+	volumeID := request.GetVolumeId()
+	if len(volumeID) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "VolumeID must be provided")
+	}
+
 	stagingTargetPath := request.GetStagingTargetPath()
 	if len(stagingTargetPath) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "StagingTargetPath must be provided")
@@ -253,15 +265,24 @@ func (n *NodeService) NodeUnstageVolume(_ context.Context, request *csi.NodeUnst
 		return &csi.NodeUnstageVolumeResponse{}, nil
 	}
 
-	n.volumeLocks.Lock()
-	defer n.volumeLocks.Unlock()
-
-	cmd := exec.New().Command("fstrim", "-v", stagingTargetPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		klog.ErrorS(err, "NodeUnstageVolume: failed to trim filesystem", "path", stagingTargetPath)
+	// Hand free space back to thin storage before the volume detaches. Skipped when the
+	// filesystem is mounted with `discard`: it has been returning space online all along,
+	// and a full trim of a mostly-empty volume is not free — QEMU meters UNMAP against the
+	// disk's write throttle, so on a `diskMBps` StorageClass this runs at size / diskMBps.
+	// Deliberately outside the volume lock too: it only touches this filesystem.
+	if n.mountedWithOption(stagingTargetPath, "discard") {
+		klog.V(5).InfoS("NodeUnstageVolume: mounted with discard, skipping fstrim", "path", stagingTargetPath)
 	} else {
-		klog.V(5).InfoS("NodeUnstageVolume: fstrim", "output", strings.TrimSpace(string(out)))
+		cmd := exec.New().Command("fstrim", "-v", stagingTargetPath)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			klog.ErrorS(err, "NodeUnstageVolume: failed to trim filesystem", "path", stagingTargetPath)
+		} else {
+			klog.V(5).InfoS("NodeUnstageVolume: fstrim", "output", strings.TrimSpace(string(out)))
+		}
 	}
+
+	n.volumeLocks.LockKey(volumeID)
+	defer n.volumeLocks.UnlockKey(volumeID) //nolint:errcheck
 
 	sourcePath, err := n.Mount.GetMountFs(stagingTargetPath)
 	if err != nil {
@@ -634,8 +655,45 @@ func collectMountOptions(params StorageParameters, fsType string, mntFlags []str
 	return options
 }
 
+// mountedWithOption reports whether path is a mount point carrying the given mount option.
+// Unknown or unlisted paths report false, so callers fall back to the conservative path.
+func (n *NodeService) mountedWithOption(path, option string) bool {
+	mounts, err := n.Mount.Mounter().List()
+	if err != nil {
+		klog.ErrorS(err, "failed to list mounts", "path", path)
+
+		return false
+	}
+
+	for _, mnt := range mounts {
+		if mnt.Path != path {
+			continue
+		}
+
+		for _, opt := range mnt.Opts {
+			if opt == option {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func collectFormatOptions(params StorageParameters, fsType string) []string {
 	formatOptions := []string{}
+
+	// No discard pass at mkfs. Every device this driver formats was created moments ago
+	// as a sparse file, thin LV or zvol and holds nothing to release, while QEMU meters
+	// UNMAP against the disk's write throttle: on a `diskMBps: 150` StorageClass the
+	// default pass cost 50 GiB / 150 MiB/s = 343 s of NodeStageVolume, long past the
+	// kubelet's deadline. Clones and snapshot restores arrive formatted and never get here.
+	switch fsType {
+	case FSTypeXfs:
+		formatOptions = append(formatOptions, "-K")
+	case FSTypeExt4, "ext3":
+		formatOptions = append(formatOptions, "-E", "nodiscard")
+	}
 
 	if params.BlockSize != nil && *params.BlockSize > 0 {
 		blockSize := fmt.Sprintf("%d", *params.BlockSize)

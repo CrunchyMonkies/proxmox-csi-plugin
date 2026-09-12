@@ -25,6 +25,7 @@ parameters:
   csi.storage.k8s.io/node-expand-secret-namespace: "kube-system"
 
   ## Optional: File system format options
+  ## (mkfs always runs with the discard pass disabled — see the notes below)
   blockSize: "4096"
   inodeSize: "256"
 
@@ -135,7 +136,7 @@ metadata:
 * `ssd` - set true if SSD/NVME disk, which enables both SSD emulation *and* Discard options in the attached Proxmox disk
 
 * `diskIOPS` - maximum r/w I/O in operations per second
-* `diskMBps` - maximum r/w throughput in megabytes per second
+* `diskMBps` - maximum r/w throughput in megabytes per second. QEMU meters **discards (UNMAP) against the write limit** too, so an in-guest `fstrim` or `blkdiscard` of a mostly-empty volume runs at `size / diskMBps` — a 50 GiB volume at `150` takes ~6 minutes. The driver therefore formats new volumes with the discard pass off (`mkfs.ext4 -E nodiscard`, `mkfs.xfs -K`: a freshly created disk has nothing to release) and skips its detach-time `fstrim` whenever the filesystem is mounted with the `discard` mount option, since space is then returned online anyway.
 
 * `backup` - set true if you want to backup the disk with VM. Dangerous option! Do not use it unless you fully understand how to use it in the recovery process.
 
