@@ -23,6 +23,8 @@ import (
 	proto "github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/helpers/ptr"
+
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -351,6 +353,58 @@ func TestGetNodeTopologyFallback(t *testing.T) {
 			region, zone := GetNodeTopology(testCase.labels)
 			assert.Equal(t, testCase.expectedRegion, region)
 			assert.Equal(t, testCase.expectedZone, zone)
+		})
+	}
+}
+
+func TestCollectFormatOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		msg      string
+		params   StorageParameters
+		fsType   string
+		expected []string
+	}{
+		{
+			msg:      "ext4 never discards at mkfs",
+			fsType:   FSTypeExt4,
+			expected: []string{"-E", "nodiscard"},
+		},
+		{
+			msg:      "ext3 never discards at mkfs",
+			fsType:   "ext3",
+			expected: []string{"-E", "nodiscard"},
+		},
+		{
+			msg:      "xfs never discards at mkfs",
+			fsType:   FSTypeXfs,
+			expected: []string{"-K"},
+		},
+		{
+			msg:      "unknown filesystem gets no options",
+			fsType:   "btrfs",
+			expected: []string{},
+		},
+		{
+			msg:      "ext4 keeps block and inode size",
+			params:   StorageParameters{BlockSize: ptr.Ptr(4096), InodeSize: ptr.Ptr(256)},
+			fsType:   FSTypeExt4,
+			expected: []string{"-E", "nodiscard", "-b", "4096", "-I", "256"},
+		},
+		{
+			msg:      "xfs keeps block and inode size in its own syntax",
+			params:   StorageParameters{BlockSize: ptr.Ptr(4096), InodeSize: ptr.Ptr(512)},
+			fsType:   FSTypeXfs,
+			expected: []string{"-K", "-b", "size=4096", "-i", "size=512"},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.msg, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, testCase.expected, collectFormatOptions(testCase.params, testCase.fsType))
 		})
 	}
 }
