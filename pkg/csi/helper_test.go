@@ -367,14 +367,14 @@ func TestCollectFormatOptions(t *testing.T) {
 		expected []string
 	}{
 		{
-			msg:      "ext4 never discards at mkfs",
+			msg:      "ext4 skips discard and journal zeroing at mkfs",
 			fsType:   FSTypeExt4,
-			expected: []string{"-E", "nodiscard"},
+			expected: []string{"-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1"},
 		},
 		{
-			msg:      "ext3 never discards at mkfs",
+			msg:      "ext3 skips discard and journal zeroing at mkfs",
 			fsType:   "ext3",
-			expected: []string{"-E", "nodiscard"},
+			expected: []string{"-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1"},
 		},
 		{
 			msg:      "xfs never discards at mkfs",
@@ -390,7 +390,7 @@ func TestCollectFormatOptions(t *testing.T) {
 			msg:      "ext4 keeps block and inode size",
 			params:   StorageParameters{BlockSize: ptr.Ptr(4096), InodeSize: ptr.Ptr(256)},
 			fsType:   FSTypeExt4,
-			expected: []string{"-E", "nodiscard", "-b", "4096", "-I", "256"},
+			expected: []string{"-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1", "-b", "4096", "-I", "256"},
 		},
 		{
 			msg:      "xfs keeps block and inode size in its own syntax",

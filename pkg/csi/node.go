@@ -683,16 +683,26 @@ func (n *NodeService) mountedWithOption(path, option string) bool {
 func collectFormatOptions(params StorageParameters, fsType string) []string {
 	formatOptions := []string{}
 
-	// No discard pass at mkfs. Every device this driver formats was created moments ago
-	// as a sparse file, thin LV or zvol and holds nothing to release, while QEMU meters
-	// UNMAP against the disk's write throttle: on a `diskMBps: 150` StorageClass the
-	// default pass cost 50 GiB / 150 MiB/s = 343 s of NodeStageVolume, long past the
-	// kubelet's deadline. Clones and snapshot restores arrive formatted and never get here.
+	// Every device this driver formats was created moments ago as a sparse file, thin LV
+	// or zvol: it holds nothing to release and reads back as zeros. Two mkfs defaults
+	// assume otherwise and both are paid at the disk's write throttle, because QEMU
+	// meters UNMAP against it as well:
+	//
+	//   - the discard pass over the whole device. On a `diskMBps: 150` StorageClass that
+	//     cost 50 GiB / 150 MiB/s = 343 s of NodeStageVolume, long past the kubelet's
+	//     deadline. nodiscard (ext) / -K (xfs).
+	//   - zeroing the ext4 journal, the last size-scaled write mkfs does: 128 MiB at
+	//     20 GiB, 1 GiB at 128 GiB and up. lazy_journal_init skips it; the manpage's
+	//     caveat about stale journal data cannot apply to a region that is already zero.
+	//     lazy_itable_init is spelled out for symmetry — it is the default wherever the
+	//     kernel supports it.
+	//
+	// Clones and snapshot restores arrive formatted and never get here.
 	switch fsType {
 	case FSTypeXfs:
 		formatOptions = append(formatOptions, "-K")
 	case FSTypeExt4, "ext3":
-		formatOptions = append(formatOptions, "-E", "nodiscard")
+		formatOptions = append(formatOptions, "-E", "nodiscard,lazy_itable_init=1,lazy_journal_init=1")
 	}
 
 	if params.BlockSize != nil && *params.BlockSize > 0 {
