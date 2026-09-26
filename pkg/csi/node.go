@@ -81,6 +81,9 @@ type NodeService struct {
 	// collectFormatOptions and NodeUnstageVolume). 64 hashed buckets, comfortably more
 	// than VolumesPerNodeHardLimit, so unrelated volumes practically never share one.
 	volumeLocks keymutex.KeyMutex
+
+	kata         *KataDirectVolumes
+	kataRuntimes *kataRuntimes
 }
 
 // NewNodeService returns a new NodeService
@@ -135,6 +138,20 @@ func (n *NodeService) NodeStageVolume(_ context.Context, request *csi.NodeStageV
 		klog.V(3).InfoS("NodeStageVolume: raw device, skipped", "device", devicePath)
 
 		return &csi.NodeStageVolumeResponse{}, nil
+	}
+
+	if n.kataEnabled() {
+		holder, _, err := findKataHolder(n.kata.Root, stagingTarget) //nolint:govet
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		// Mounting the filesystem on the node while a VM has it mounted would corrupt it.
+		if holder != "" {
+			klog.V(3).InfoS("NodeStageVolume: volume is mounted inside a Kata VM, not mounting on the node", "volumeID", volumeID, "target", holder)
+
+			return &csi.NodeStageVolumeResponse{}, nil
+		}
 	}
 
 	klog.V(5).InfoS("NodeStageVolume: mount device", "device", devicePath, "path", stagingTarget)
@@ -265,6 +282,17 @@ func (n *NodeService) NodeUnstageVolume(_ context.Context, request *csi.NodeUnst
 		return &csi.NodeUnstageVolumeResponse{}, nil
 	}
 
+	if n.kataEnabled() {
+		holder, _, err := findKataHolder(n.kata.Root, stagingTargetPath)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		if holder != "" {
+			return nil, status.Errorf(codes.FailedPrecondition, "volume %s is still mounted inside a Kata VM (%s)", volumeID, holder)
+		}
+	}
+
 	// Hand free space back to thin storage before the volume detaches. Skipped when the
 	// filesystem is mounted with `discard`: it has been returning space online all along,
 	// and a full trim of a mostly-empty volume is not free — QEMU meters UNMAP against the
@@ -322,7 +350,7 @@ func (n *NodeService) NodeUnstageVolume(_ context.Context, request *csi.NodeUnst
 // NodePublishVolume mounts the volume on the node.
 //
 //nolint:dupl
-func (n *NodeService) NodePublishVolume(_ context.Context, request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
+func (n *NodeService) NodePublishVolume(ctx context.Context, request *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
 	klog.V(4).InfoS("NodePublishVolume: called", "args", protosanitizer.StripSecrets(request))
 
 	stagingTargetPath := request.GetStagingTargetPath()
@@ -388,6 +416,17 @@ func (n *NodeService) NodePublishVolume(_ context.Context, request *csi.NodePubl
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 
+	if n.kataEnabled() {
+		handled, err := n.publishKata(ctx, request, stagingTargetPath, targetPath, volumeCapability)
+		if err != nil {
+			return nil, err
+		}
+
+		if handled {
+			return &csi.NodePublishVolumeResponse{}, nil
+		}
+	}
+
 	_, err := m.GetMountFs(stagingTargetPath)
 	if err != nil {
 		klog.ErrorS(err, "NodePublishVolume: stage volume is not mounted", "path", stagingTargetPath)
@@ -435,6 +474,21 @@ func (n *NodeService) NodeUnpublishVolume(_ context.Context, request *csi.NodeUn
 		return nil, status.Error(codes.InvalidArgument, "TargetPath must be provided")
 	}
 
+	if n.kataEnabled() {
+		info, err := readKataMountInfo(n.kata.Root, targetPath)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		if info != nil {
+			if err := n.unpublishKata(targetPath, info); err != nil {
+				return nil, err
+			}
+
+			return &csi.NodeUnpublishVolumeResponse{}, nil
+		}
+	}
+
 	err := n.Mount.UnmountPath(targetPath)
 	if err != nil {
 		klog.ErrorS(err, "NodeUnpublishVolume: error unmounting volume", "path", targetPath)
@@ -465,7 +519,21 @@ func (n *NodeService) NodeGetVolumeStats(_ context.Context, request *csi.NodeGet
 		return nil, status.Errorf(codes.NotFound, "target: %s not found", volumePath)
 	}
 
-	stats, err := n.Mount.GetDeviceStats(volumePath)
+	statsPath := volumePath
+
+	if n.kataEnabled() {
+		info, err := readKataMountInfo(n.kata.Root, volumePath)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		// The filesystem is mounted inside a Kata VM: only the device size is known here.
+		if info != nil {
+			statsPath = info.Device
+		}
+	}
+
+	stats, err := n.Mount.GetDeviceStats(statsPath)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to get stats by path: %s", err)
 	}
@@ -510,6 +578,17 @@ func (n *NodeService) NodeExpandVolume(_ context.Context, request *csi.NodeExpan
 
 	if volCapability.GetBlock() != nil {
 		return &csi.NodeExpandVolumeResponse{}, nil
+	}
+
+	if n.kataEnabled() {
+		info, err := readKataMountInfo(n.kata.Root, volumePath)
+		if err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
+
+		if info != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "volume %s is mounted inside a Kata VM; the filesystem grows when the pod restarts", volumeID)
+		}
 	}
 
 	output, err := n.Mount.GetMountFs(volumePath)

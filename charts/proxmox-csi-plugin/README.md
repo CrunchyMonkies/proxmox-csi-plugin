@@ -1,6 +1,6 @@
 # proxmox-csi-plugin
 
-![Version: 0.17.1](https://img.shields.io/badge/Version-0.17.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.6.1](https://img.shields.io/badge/AppVersion-v0.20.0--1.6.1-informational?style=flat-square)
+![Version: 0.18.0](https://img.shields.io/badge/Version-0.18.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.6.1](https://img.shields.io/badge/AppVersion-v0.20.0--1.6.1-informational?style=flat-square)
 
 Container Storage Interface plugin for Proxmox
 
@@ -136,6 +136,10 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | controller.snapshotter.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-snapshotter","tag":"v8.3.0"}` | CSI Snapshotter. refs: https://github.com/kubernetes-csi/external-snapshotter |
 | controller.snapshotter.args | list | `[]` | Snapshotter arguments. example: --feature-gates=CSIVolumeGroupSnapshot=true |
 | controller.snapshotter.resources | object | `{"requests":{"cpu":"10m","memory":"16Mi"}}` | Snapshotter resource requests and limits. ref: https://kubernetes.io/docs/user-guide/compute-resources/ |
+| node.kataDirectVolumes | object | `{"enabled":false,"handlerPrefix":"kata","root":"/run/kata-containers/shared/direct-volumes"}` | Kata Containers direct-assigned volumes: filesystem volumes of pods whose RuntimeClass handler starts with `handlerPrefix` are mounted inside the Kata VM instead of being shared over virtio-fs. A StorageClass opts out with the parameter `kataDirectVolume: "false"`. |
+| node.kataDirectVolumes.enabled | bool | `false` | Enable direct-assigned volumes for Kata pods. |
+| node.kataDirectVolumes.handlerPrefix | string | `"kata"` | RuntimeClass handler prefix of Kata runtimes. |
+| node.kataDirectVolumes.root | string | `"/run/kata-containers/shared/direct-volumes"` | Directory Kata reads direct volume descriptions from. |
 | node.plugin.image | object | `{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/proxmox-csi-node","tag":""}` | Node CSI Driver. |
 | node.plugin.resources | object | `{}` | Node CSI Driver resource requests and limits. ref: https://kubernetes.io/docs/user-guide/compute-resources/ |
 | node.driverRegistrar.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-node-driver-registrar","tag":"v2.15.0"}` | Node CSI driver registrar. ref: https://github.com/kubernetes-csi/node-driver-registrar |

@@ -45,6 +45,10 @@ var (
 	csiEndpoint = flag.String("csi-address", "unix:///csi/csi.sock", "CSI Endpoint")
 	nodeID      = flag.String("node-id", "", "Node name")
 
+	kataDirectVolumes = flag.Bool("kata-direct-volumes", false, "Mount filesystem volumes of Kata Containers pods inside the VM (direct-assigned volumes) instead of sharing them over virtio-fs.")
+	kataHandlerPrefix = flag.String("kata-handler-prefix", csi.DefaultKataHandlerPrefix, "RuntimeClass handler prefix of Kata Containers runtimes.")
+	kataVolumeRoot    = flag.String("kata-direct-volume-root", csi.DefaultKataDirectVolumeRoot, "Directory Kata Containers reads direct-assigned volume descriptions from.")
+
 	master     = flag.String("master", "", "Master URL to build a client config from. Either this or kubeconfig needs to be set if the provisioner is being run out of cluster.")
 	kubeconfig = flag.String("kubeconfig", "", "Absolute path to the kubeconfig file. Either this or master needs to be set if the provisioner is being run out of cluster.")
 )
@@ -155,6 +159,16 @@ func main() {
 
 	identityService := csi.NewIdentityService()
 	nodeService := csi.NewNodeService(nodeName, clientset)
+
+	if *kataDirectVolumes {
+		klog.Infof("Kata direct-assigned volumes enabled (handler prefix %q, root %s)", *kataHandlerPrefix, *kataVolumeRoot)
+
+		nodeService.SetKataDirectVolumes(csi.KataDirectVolumes{
+			Enabled:       true,
+			HandlerPrefix: *kataHandlerPrefix,
+			Root:          *kataVolumeRoot,
+		})
+	}
 
 	proto.RegisterIdentityServer(srv, identityService)
 	proto.RegisterNodeServer(srv, nodeService)

@@ -3,6 +3,8 @@ options:
   enableCapacity: false
 
 node:
+  kataDirectVolumes:
+    enabled: true
   nodeSelector:
     node.cloudprovider.kubernetes.io/platform: nocloud
   tolerations:
