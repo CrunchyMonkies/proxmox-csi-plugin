@@ -52,6 +52,11 @@ spec:
             - "-v={{ .Values.logVerbosityLevel }}"
             - "--csi-address=unix:///csi/csi.sock"
             - "--node-id=$(NODE_NAME)"
+            {{- if .Values.node.kataDirectVolumes.enabled }}
+            - "--kata-direct-volumes"
+            - "--kata-handler-prefix={{ .Values.node.kataDirectVolumes.handlerPrefix }}"
+            - "--kata-direct-volume-root={{ .Values.node.kataDirectVolumes.root }}"
+            {{- end }}
           env:
             - name: NODE_NAME
               valueFrom:
@@ -68,6 +73,10 @@ spec:
               mountPath: /dev
             - name: sys
               mountPath: /sys
+            {{- if .Values.node.kataDirectVolumes.enabled }}
+            - name: kata-direct-volumes
+              mountPath: {{ .Values.node.kataDirectVolumes.root }}
+            {{- end }}
         - name: csi-node-driver-registrar
           securityContext:
             allowPrivilegeEscalation: false
@@ -131,6 +140,12 @@ spec:
           hostPath:
             path: /sys
             type: Directory
+        {{- if .Values.node.kataDirectVolumes.enabled }}
+        - name: kata-direct-volumes
+          hostPath:
+            path: {{ .Values.node.kataDirectVolumes.root }}
+            type: DirectoryOrCreate
+        {{- end }}
       {{- with .Values.node.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

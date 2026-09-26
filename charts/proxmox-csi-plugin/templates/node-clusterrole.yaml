@@ -12,3 +12,18 @@ rules:
       - nodes
     verbs:
       - get
+  {{- if .Values.node.kataDirectVolumes.enabled }}
+  # Kata direct volumes: whether the pod a volume is published to runs in a Kata VM.
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+  - apiGroups:
+      - node.k8s.io
+    resources:
+      - runtimeclasses
+    verbs:
+      - get
+  {{- end }}

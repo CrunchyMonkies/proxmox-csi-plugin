@@ -229,6 +229,16 @@ controller:
         memory: 16Mi
 
 node:
+  # -- Kata Containers direct-assigned volumes: filesystem volumes of pods whose RuntimeClass
+  # handler starts with `handlerPrefix` are mounted inside the Kata VM instead of being shared
+  # over virtio-fs. A StorageClass opts out with the parameter `kataDirectVolume: "false"`.
+  kataDirectVolumes:
+    # -- Enable direct-assigned volumes for Kata pods.
+    enabled: false
+    # -- RuntimeClass handler prefix of Kata runtimes.
+    handlerPrefix: kata
+    # -- Directory Kata reads direct volume descriptions from.
+    root: /run/kata-containers/shared/direct-volumes
   plugin:
     # -- Node CSI Driver.
     image:

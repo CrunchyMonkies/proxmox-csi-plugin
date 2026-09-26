@@ -83,6 +83,10 @@ type StorageParameters struct {
 
 	RootDirPermissions string `json:"rootDirPermissions,omitempty"`
 
+	// KataDirectVolume set to false keeps volumes of Kata pods on virtio-fs instead of mounting
+	// the disk inside the VM (see NodeService.SetKataDirectVolumes).
+	KataDirectVolume *bool `json:"kataDirectVolume,omitempty"`
+
 	Replicate         bool   `json:"replicate,omitempty"   cfg:"replicate"`
 	ReplicateSchedule string `json:"replicateSchedule,omitempty"`
 	ReplicateZones    string `json:"replicateZones,omitempty"`
