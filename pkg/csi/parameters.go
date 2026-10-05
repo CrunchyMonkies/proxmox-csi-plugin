@@ -143,6 +143,24 @@ func ExtractParameters(parameters map[string]string) (StorageParameters, error) 
 	return p, nil
 }
 
+// VolumeContext returns the CSI VolumeContext for a volume created with these
+// StorageClass and VolumeAttributesClass parameters: exactly what CreateVolume
+// puts on the PV. The volume operator uses it so a remote volume's PV carries
+// the same context as a direct one.
+func VolumeContext(parameters, mutableParameters map[string]string) (map[string]string, error) {
+	params, err := ExtractParameters(parameters)
+	if err != nil {
+		return nil, err
+	}
+
+	paramsVAC, err := ExtractModifyVolumeParameters(mutableParameters)
+	if err != nil {
+		return nil, err
+	}
+
+	return paramsVAC.MergeMap(params.ToMap()), nil
+}
+
 // ToMap converts storage parameters to kubernetes map of string.
 func (p StorageParameters) ToMap() map[string]string {
 	m := make(map[string]string)

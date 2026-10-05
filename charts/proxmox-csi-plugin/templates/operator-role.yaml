@@ -1,0 +1,90 @@
+{{- if .Values.operator.enabled }}
+{{- if .Values.operator.rbac.create }}
+{{- /*
+Collect the Secret names the operator is allowed to read. token_ref names come
+from the config the chart itself renders; extraSecretNames covers the
+existingConfigSecret case, where the chart cannot see them.
+*/ -}}
+{{- $secretNames := list }}
+{{- range .Values.operator.config.clusters }}
+{{- if .token_ref }}
+{{- $secretNames = append $secretNames .token_ref.name }}
+{{- end }}
+{{- end }}
+{{- $secretNames = concat $secretNames .Values.operator.rbac.extraSecretNames | compact | uniq | sortAlpha }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+rules:
+  # Leader election. Namespaced on purpose: the lease lives beside the operator.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # The lease lock records an Event when a replica becomes leader.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # The Proxmox credential, resolved once at startup from token_ref.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    {{- if $secretNames }}
+    resourceNames:
+      {{- toYaml $secretNames | nindent 6 }}
+    {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "proxmox-csi-plugin-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if and .Values.operator.leaderElection.enabled .Values.operator.leaderElection.namespace (ne .Values.operator.leaderElection.namespace .Release.Namespace) }}
+---
+# The lease was pointed somewhere else; lease permissions have to follow it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator-leaderelection
+  namespace: {{ .Values.operator.leaderElection.namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator-leaderelection
+  namespace: {{ .Values.operator.leaderElection.namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator-leaderelection
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "proxmox-csi-plugin-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -37,6 +37,9 @@ policies:
         - .go
       excludeSuffixes:
         - .pb.go
+        # controller-gen output: it carries the header, but always below a
+        # //go:build line, which the license check reads as a preceding comment.
+        - zz_generated.deepcopy.go
       allowPrecedingComments: false
       header: |
         /*

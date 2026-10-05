@@ -1,0 +1,391 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: tenantclusters.csi.crunchymonkies.com
+spec:
+  group: csi.crunchymonkies.com
+  names:
+    categories:
+    - proxmox
+    kind: TenantCluster
+    listKind: TenantClusterList
+    plural: tenantclusters
+    shortNames:
+    - pxtenant
+    - pxtenants
+    singular: tenantcluster
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .spec.namespace
+      name: Namespace
+      type: string
+    - jsonPath: .spec.placeholderVmid
+      name: Placeholder
+      type: integer
+    - jsonPath: .status.resolvedVmids
+      name: VMIDs
+      priority: 1
+      type: string
+    - jsonPath: .status.used.volumes
+      name: Volumes
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          TenantCluster registers a tenant Kubernetes cluster with the volume control
+          plane and carries its ownership, quota and parameter policy.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              TenantClusterSpec registers a tenant Kubernetes cluster and carries its policy.
+
+              This object is applied by an operator of the management cluster, never by a
+              tenant and never by the Helm chart -- templating it would let a `helm upgrade`
+              silently flip a tenant from Observe to Enforce.
+            properties:
+              allowedStorages:
+                description: |-
+                  AllowedStorages is the set of Proxmox storage names this tenant may
+                  provision on. Empty means none -- a tenant with no entry here can create
+                  nothing, which is the correct default for a field an operator must fill in.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              issuer:
+                description: |-
+                  Issuer is the OIDC issuer URL of the tenant's service account tokens, e.g.
+                  "https://oidc.bne1-cluster1.ouchi.com.au". Recorded for audit and for the
+                  onboarding runbook; the apiserver, not the operator, verifies it.
+                type: string
+              legacyControllerVmids:
+                description: |-
+                  LegacyControllerVMIDs are placeholder VMIDs this tenant's pre-existing
+                  disks may already carry, e.g. [9999] during adoption. The ledger is
+                  authoritative and the embedded VMID is advisory; renaming ~86 live disks to
+                  tidy this up would be 86 chances to lose a volume, on a rename path that
+                  already has a data-loss incident in its history.
+                items:
+                  format: int32
+                  type: integer
+                type: array
+                x-kubernetes-list-type: set
+              mode:
+                default: Observe
+                description: |-
+                  Mode gates what the operator will do for this tenant. Defaults to Observe:
+                  registering a tenant must never be able to mutate Proxmox on its own.
+                enum:
+                - Observe
+                - Enforce
+                - Suspended
+                - Decommission
+                type: string
+              namespace:
+                description: |-
+                  Namespace in the MANAGEMENT cluster holding this tenant's volume objects.
+                  Must be unique across TenantClusters.
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: namespace is immutable
+                  rule: self == oldSelf
+              namespaceQuotas:
+                description: |-
+                  NamespaceQuotas cap individual namespaces inside the tenant cluster. See
+                  TenantClaimRef: this is fairness, not security.
+                items:
+                  description: |-
+                    NamespaceQuota applies to the namespace of the PVC inside the TENANT cluster,
+                    as reported by spec.claimRef.namespace.
+                  properties:
+                    maxCapacity:
+                      additionalProperties:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      type: object
+                    maxVolumes:
+                      format: int32
+                      type: integer
+                    namespace:
+                      minLength: 1
+                      type: string
+                  required:
+                  - namespace
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - namespace
+                x-kubernetes-list-type: map
+              parameterPolicy:
+                description: |-
+                  ParameterPolicy constrains the StorageClass parameters this tenant may
+                  request.
+                properties:
+                  allowed:
+                    description: |-
+                      Allowed lists the parameter keys a tenant may set. Nil means all known
+                      keys; empty means none.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                  forced:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Forced overrides parameters regardless of what the tenant asked for, e.g.
+                      backup: "false".
+                    type: object
+                  maxInt:
+                    additionalProperties:
+                      format: int64
+                      type: integer
+                    description: |-
+                      MaxInt caps numeric parameters, e.g. diskMBps: 150, diskIOPS: 3000. A
+                      parameter named here that does not parse as an integer is rejected.
+                    type: object
+                  maxVolumeBytes:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxVolumeBytes rejects a single oversized volume synchronously, which an
+                      aggregate quota inherently cannot -- it is the check that catches the
+                      one-40TiB-PVC mistake before any disk is allocated.
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                type: object
+              placeholderVmid:
+                description: |-
+                  PlaceholderVMID is the VMID embedded in the names of this tenant's
+                  unattached disks (vm-<placeholder>-pvc-<uuid>), mirroring the driver's
+                  features.controllerVmID. Must be unique across TenantClusters -- every
+                  cluster defaulting to 9999, as they do today, is what makes unattached
+                  disks indistinguishable by owner.
+                format: int32
+                maximum: 999999999
+                minimum: 100
+                type: integer
+              pool:
+                description: |-
+                  Pool is a PVE pool whose VM membership defines this tenant's VMs. Resolved
+                  on a timer into status.resolvedVmids, so a VMID that moves pools loses
+                  access without anyone editing this object.
+                type: string
+              quota:
+                description: Quota caps this tenant in aggregate. This is the real
+                  boundary.
+                properties:
+                  maxCapacity:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      MaxCapacity caps total provisioned capacity per Proxmox storage name. A
+                      storage absent from this map is unlimited; use AllowedStorages to deny.
+                    type: object
+                  maxVolumes:
+                    description: MaxVolumes caps the number of ProxmoxVolumes. Nil
+                      means unlimited.
+                    format: int32
+                    type: integer
+                type: object
+              region:
+                description: Region is the Proxmox region, matching the tenant's topology
+                  labels.
+                minLength: 1
+                type: string
+              subject:
+                description: |-
+                  Subject is the authenticated username the management apiserver must see
+                  for requests from this tenant, e.g. "pvx:bne1-cluster1".
+
+                  This must match the username literal in the apiserver's jwt[] stanza and
+                  the identity in the operator chart's tenants[] entry. All three are checked
+                  against each other in CI; a copy-pasted stanza whose username was never
+                  changed is the one mistake issuer-uniqueness does not catch.
+                minLength: 1
+                type: string
+              vmids:
+                description: VMIDs is an explicit allowlist, unioned with the Pool
+                  expansion.
+                items:
+                  format: int32
+                  type: integer
+                type: array
+                x-kubernetes-list-type: set
+            required:
+            - namespace
+            - placeholderVmid
+            - region
+            - subject
+            type: object
+          status:
+            description: TenantClusterStatus is written only by the operator.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              namespaceUsed:
+                description: NamespaceUsed is per-tenant-namespace accounting.
+                items:
+                  description: NamespaceUsage is QuotaUsage for one tenant-side namespace.
+                  properties:
+                    capacity:
+                      additionalProperties:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                        x-kubernetes-int-or-string: true
+                      type: object
+                    namespace:
+                      type: string
+                    volumes:
+                      format: int32
+                      type: integer
+                  required:
+                  - namespace
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - namespace
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the spec generation this status
+                  reflects.
+                format: int64
+                type: integer
+              resolvedVmids:
+                description: |-
+                  ResolvedVMIDs is the union of spec.vmids and the Pool expansion. Attach
+                  authorization checks against this, not against spec.
+                items:
+                  format: int32
+                  type: integer
+                type: array
+                x-kubernetes-list-type: set
+              used:
+                description: Used is aggregate accounting for the tenant.
+                properties:
+                  capacity:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: Capacity per Proxmox storage name.
+                    type: object
+                  volumes:
+                    description: Volumes currently counted.
+                    format: int32
+                    type: integer
+                type: object
+              vmidsObservedAt:
+                description: |-
+                  VMIDsObservedAt is when ResolvedVMIDs was last refreshed. The operator
+                  refuses an attach on a stale resolution rather than trusting an old one,
+                  which is what makes VMID recycling across tenants safe.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

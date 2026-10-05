@@ -1,0 +1,22 @@
+{{- if .Values.operator.enabled }}
+{{- /*
+CRDs are rendered as ordinary templates rather than from the chart's crds/
+directory, which Helm installs unconditionally and never upgrades. That keeps
+them off tenant clusters (only rendered with operator.enabled) and lets
+`helm upgrade` roll schema changes. Each is annotated
+helm.sh/resource-policy: keep so `helm uninstall` leaves the CRDs -- and the
+volume ownership ledger they carry -- in place.
+
+files/crds/ is controller-gen output from pkg/apis, refreshed by `make manifests`.
+*/ -}}
+{{- range $path, $_ := .Files.Glob "files/crds/*.yaml" }}
+{{- $crd := $.Files.Get $path | fromYaml }}
+{{- $annotations := default (dict) (index $crd "metadata" "annotations") }}
+{{- $_ := set $annotations "helm.sh/resource-policy" "keep" }}
+{{- $metadata := $crd.metadata }}
+{{- $_ := set $metadata "annotations" $annotations }}
+{{- $_ := set $crd "metadata" $metadata }}
+---
+{{ toYaml $crd }}
+{{- end }}
+{{- end }}

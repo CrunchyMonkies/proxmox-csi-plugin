@@ -1,0 +1,22 @@
+{{- if .Values.operator.enabled }}
+{{- if .Values.operator.rbac.create }}
+{{- /*
+Generated, not hand-written. files/operator-role.yaml is controller-gen output
+from +kubebuilder:rbac markers in pkg/operator, refreshed by
+`make manifests`. So the list a reviewer reads
+here is the same list the code declares it needs.
+*/ -}}
+{{- $generated := .Files.Get "files/operator-role.yaml" | fromYaml }}
+{{- if not $generated.rules }}
+{{- fail "files/operator-role.yaml has no rules: run `make manifests` and commit the result" }}
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+rules:
+  {{- toYaml $generated.rules | nindent 2 }}
+{{- end }}
+{{- end }}

@@ -127,6 +127,16 @@ linters:
         linters:
           - dupl
           - goconst
+      - path: test/operator/
+        linters:
+          - dupl
+          - goconst
+      # Generated deepcopy is not ours to style.
+      - path: zz_generated\..*\.go
+        linters:
+          - dupl
+          - lll
+          - stylecheck
       # Fork-only code whose repeated literals are data, not magic values:
       # Proxmox API request-parameter names (pkg/tools/proxmox), the RBAC
       # preflight tables in the pvecsictl subcommands, and the "true"/"false"/
@@ -161,3 +171,6 @@ formatters:
         - default # Contains all imports that could not be matched to another section type.
         - prefix(github.com/sergelogvinov) # Groups all imports with the specified Prefix.
         - prefix(k8s.io) # Groups all imports with the specified Prefix.
+  exclusions:
+    paths:
+      - zz_generated\..*\.go

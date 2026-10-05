@@ -1,7 +1,7 @@
 # syntax = docker/dockerfile:1.22
 ########################################
 
-FROM golang:1.26.5-trixie AS develop
+FROM golang:1.26.7-trixie AS develop
 
 WORKDIR /src
 COPY ["go.mod", "go.sum", "/src/"]
@@ -9,7 +9,7 @@ RUN go mod download
 
 ########################################
 
-FROM --platform=${BUILDPLATFORM} golang:1.26.5-alpine3.24 AS builder
+FROM --platform=${BUILDPLATFORM} golang:1.26.7-alpine3.24 AS builder
 RUN apk update && apk add --no-cache make git
 ENV GO111MODULE=on
 WORKDIR /src
@@ -35,6 +35,19 @@ ARG TARGETARCH
 COPY --from=builder /src/bin/proxmox-csi-controller-${TARGETARCH} /bin/proxmox-csi-controller
 
 ENTRYPOINT ["/bin/proxmox-csi-controller"]
+
+########################################
+
+FROM --platform=${TARGETARCH} scratch AS proxmox-csi-operator
+LABEL org.opencontainers.image.source="https://github.com/sergelogvinov/proxmox-csi-plugin" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.description="Proxmox VE CSI volume operator"
+
+COPY --from=gcr.io/distroless/static-debian13:nonroot . .
+ARG TARGETARCH
+COPY --from=builder /src/bin/proxmox-csi-operator-${TARGETARCH} /bin/proxmox-csi-operator
+
+ENTRYPOINT ["/bin/proxmox-csi-operator"]
 
 ########################################
 

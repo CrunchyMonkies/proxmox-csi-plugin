@@ -349,19 +349,7 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 		}
 	}
 
-	format := ""
-
-	// LVM Snapshots as Volume-Chain are a technology preview.
-	if storageConfig.PluginType == "lvm" && params.StorageFormat == "qcow2" {
-		format = params.StorageFormat
-	}
-
-	if getStorageLevel(storageConfig) == "file" {
-		format = "raw"
-		if params.StorageFormat == "qcow2" {
-			format = params.StorageFormat
-		}
-	}
+	format := toolsproxmox.DiskFormat(storageConfig.PluginType, params.StorageFormat)
 
 	vol := volume.NewVolume(region, zone, params.StorageID, fmt.Sprintf("vm-%d-%s", id, pvc), format)
 

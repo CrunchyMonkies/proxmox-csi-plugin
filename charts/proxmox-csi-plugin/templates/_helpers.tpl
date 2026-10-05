@@ -75,3 +75,63 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Operator selector labels
+*/}}
+{{- define "proxmox-csi-plugin-operator.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "proxmox-csi-plugin.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: operator
+{{- end }}
+
+{{/*
+Create the name of the operator service account to use
+*/}}
+{{- define "proxmox-csi-plugin-operator.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- printf "%s-operator" (include "proxmox-csi-plugin.fullname" .) }}
+{{- else }}
+{{- "default" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Name of the Secret holding the operator cloud config, whether this chart
+renders it or an existing one was supplied.
+*/}}
+{{- define "proxmox-csi-plugin-operator.configSecretName" -}}
+{{- default (printf "%s-operator" (include "proxmox-csi-plugin.fullname" .)) .Values.operator.existingConfigSecret }}
+{{- end }}
+
+{{/*
+Key inside the operator config Secret.
+*/}}
+{{- define "proxmox-csi-plugin-operator.configSecretKey" -}}
+{{- default "config.yaml" .Values.operator.existingConfigSecretKey }}
+{{- end }}
+
+{{/*
+Refuse to render a Proxmox credential into a manifest.
+Inline token_secret or password are refused at template time.
+*/}}
+{{- define "proxmox-csi-plugin-operator.assertNoInlineCredentials" -}}
+{{- range $i, $cluster := .Values.operator.config.clusters }}
+{{- if $cluster.token_secret }}
+{{- fail (printf "operator.config.clusters[%d] (region %q) sets token_secret inline. Use token_ref to name a Secret instead." $i (default "" $cluster.region)) }}
+{{- end }}
+{{- if $cluster.password }}
+{{- fail (printf "operator.config.clusters[%d] (region %q) sets password inline. The operator authenticates with a scoped API token via token_ref." $i (default "" $cluster.region)) }}
+{{- end }}
+{{- if not (or $cluster.token_ref $cluster.token_id_file $cluster.token_secret_file) }}
+{{- fail (printf "operator.config.clusters[%d] (region %q) has no token_ref. The operator resolves its credential from a Secret at startup." $i (default "" $cluster.region)) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Namespace in the management cluster holding one tenant's volume objects.
+*/}}
+{{- define "proxmox-csi-plugin-operator.tenantNamespace" -}}
+{{- default (printf "tenant-%s" .name) .namespace }}
+{{- end }}

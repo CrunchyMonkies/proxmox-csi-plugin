@@ -1,0 +1,12 @@
+version: v2
+plugins:
+  # Run through `go tool` so the plugin versions are the ones pinned in go.mod's
+  # tool directives, not whatever happens to be on $PATH (CI has none).
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: pkg/apis
+    opt:
+      - paths=source_relative
+  - local: ["go", "tool", "protoc-gen-go-grpc"]
+    out: pkg/apis
+    opt:
+      - paths=source_relative

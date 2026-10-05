@@ -37,6 +37,10 @@ jobs:
           args: --timeout=5m --config=.golangci.yml
       - name: Unit
         run: make unit
+      - name: Generated code
+        run: make generate-check
+      - name: Operator isolation
+        run: make operator-isolation
       - name: Build
         timeout-minutes: 10
         run: make images

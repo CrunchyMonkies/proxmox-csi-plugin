@@ -19,15 +19,23 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"flag"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 
 	proto "github.com/container-storage-interface/spec/lib/go/csi"
+	"golang.org/x/oauth2/clientcredentials"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/oauth"
 
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi"
+	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/csi/remote"
 	tools "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/kubernetes"
 
 	clientkubernetes "k8s.io/client-go/kubernetes"
@@ -51,6 +59,17 @@ var (
 	annotateNodeInstanceID = flag.Bool("annotate-node-instance-id", false,
 		"Write the resolved Proxmox VMID back to the node as the "+csi.AnnotationProxmoxInstanceID+" annotation, so later lookups skip the cluster scan. "+
 			"Only has an effect where the providerID carries no VMID, and requires patch on nodes.")
+
+	remoteVolumeAPI = flag.String("remote-volume-api", "",
+		"Address of the operator volume API (host:port). Enables remote mode.")
+	remoteTokenURL = flag.String("remote-token-url", "",
+		"OAuth2 token endpoint URL for remote mode.")
+	remoteClientIDFile = flag.String("remote-client-id-file", "",
+		"Path to a file containing the OAuth2 client ID.")
+	remoteClientSecretFile = flag.String("remote-client-secret-file", "",
+		"Path to a file containing the OAuth2 client secret.")
+	remoteCAFile = flag.String("remote-ca-file", "",
+		"Path to a CA certificate file for the remote volume API (optional).")
 )
 
 func main() {
@@ -70,20 +89,13 @@ func main() {
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 
-	if *cloudconfig == "" {
-		klog.Error("cloud-config must be provided")
+	if *remoteVolumeAPI != "" && *cloudconfig != "" {
+		klog.Error("--remote-volume-api and --cloud-config are mutually exclusive")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 
-	kconfig, namespace, err := tools.BuildConfig(*kubeconfig, "")
-	if err != nil {
-		klog.Error(err, "Failed to build a Kubernetes config")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
-	}
-
-	clientset, err := clientkubernetes.NewForConfig(kconfig)
-	if err != nil {
-		klog.Error(err, "Failed to create a Clientset")
+	if *remoteVolumeAPI == "" && *cloudconfig == "" {
+		klog.Error("either --cloud-config or --remote-volume-api must be provided")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 
@@ -128,19 +140,47 @@ func main() {
 	}
 
 	srv := grpc.NewServer(opts...)
-
 	identityService := csi.NewIdentityService()
-
-	controllerService, err := csi.NewControllerService(clientset, *cloudconfig, namespace)
-	if err != nil {
-		klog.ErrorS(err, "Failed to create controller service")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
-	}
-
-	controllerService.AnnotateNodeInstanceID = *annotateNodeInstanceID
-
-	proto.RegisterControllerServer(srv, controllerService)
 	proto.RegisterIdentityServer(srv, identityService)
+
+	if *remoteVolumeAPI != "" {
+		// Remote mode: connect to the operator's volume API.
+		conn, err := dialRemoteAPI(*remoteVolumeAPI, *remoteTokenURL, *remoteClientIDFile, *remoteClientSecretFile, *remoteCAFile)
+		if err != nil {
+			klog.ErrorS(err, "Failed to connect to remote volume API")
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
+		defer conn.Close() //nolint:errcheck // Best-effort cleanup on exit.
+
+		controllerService := remote.NewControllerServer(conn)
+		controllerService.StartCapacityWatch(context.Background())
+
+		proto.RegisterControllerServer(srv, controllerService)
+		klog.InfoS("Running in remote mode", "api", *remoteVolumeAPI)
+	} else {
+		// Direct mode: build the Proxmox client pool.
+		kconfig, namespace, err := tools.BuildConfig(*kubeconfig, "")
+		if err != nil {
+			klog.Error(err, "Failed to build a Kubernetes config")
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
+
+		clientset, err := clientkubernetes.NewForConfig(kconfig)
+		if err != nil {
+			klog.Error(err, "Failed to create a Clientset")
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
+
+		controllerService, err := csi.NewControllerService(clientset, *cloudconfig, namespace)
+		if err != nil {
+			klog.ErrorS(err, "Failed to create controller service")
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
+
+		controllerService.AnnotateNodeInstanceID = *annotateNodeInstanceID
+
+		proto.RegisterControllerServer(srv, controllerService)
+	}
 
 	klog.InfoS("Listening for connection on address", "address", listener.Addr())
 
@@ -148,4 +188,68 @@ func main() {
 		klog.ErrorS(err, "Failed to run driver")
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
+}
+
+// dialRemoteAPI establishes a gRPC connection to the operator's volume API
+// with OAuth2 client credentials.
+func dialRemoteAPI(address, tokenURL, clientIDFile, clientSecretFile, caFile string) (*grpc.ClientConn, error) {
+	clientID, err := readFileContent(clientIDFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading client ID file: %w", err)
+	}
+
+	clientSecret, err := readFileContent(clientSecretFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading client secret file: %w", err)
+	}
+
+	ccConfig := clientcredentials.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		TokenURL:     tokenURL,
+	}
+
+	tlsConfig := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if caFile != "" {
+		caCert, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading CA file: %w", err)
+		}
+
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		tlsConfig.RootCAs = pool
+	}
+
+	tokenSource := ccConfig.TokenSource(context.Background())
+
+	conn, err := grpc.NewClient(address,
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+		grpc.WithPerRPCCredentials(oauth.TokenSource{TokenSource: tokenSource}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("dialing %s: %w", address, err)
+	}
+
+	return conn, nil
+}
+
+// readFileContent reads a file and returns its trimmed content.
+func readFileContent(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("file path is empty")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(data)), nil
 }

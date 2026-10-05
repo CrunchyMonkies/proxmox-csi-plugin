@@ -1,0 +1,78 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} installed into namespace {{ .Release.Namespace }}.
+
+{{- if or .Values.controller.enabled .Values.node.enabled }}
+
+CSI Plugin
+----------
+Check that the controller and node pods are running:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name={{ include "proxmox-csi-plugin.name" . }}
+{{- end }}
+
+{{- if .Values.migrator.enabled }}
+
+Volume Migrator
+---------------
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "proxmox-csi-plugin.fullname" . }}-migrator
+{{- end }}
+
+{{- if .Values.operator.enabled }}
+
+Volume Operator
+---------------
+Check the operator came up and elected a leader:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "proxmox-csi-plugin.fullname" . }}-operator
+  kubectl -n {{ .Release.Namespace }} get lease {{ include "proxmox-csi-plugin.fullname" . }}-operator 2>/dev/null || true
+  kubectl get pxstore
+
+The last command should list one entry per Proxmox region/zone/storage, with
+capacity matching `pvesm status` on the hypervisor. If it is empty, the operator
+is either not leader yet or cannot reach Proxmox:
+
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "proxmox-csi-plugin.fullname" . }}-operator
+
+CRDs
+----
+CRDs are rendered from files/crds/*.yaml with helm.sh/resource-policy: keep, so
+`helm uninstall` leaves the volume ownership ledger in place. After bumping this
+chart, CRDs already in the cluster are not automatically upgraded; apply by hand
+if needed.
+
+{{- if not .Values.operator.tenants }}
+
+Tenants
+-------
+No tenants are configured. Add entries under `operator.tenants` to render tenant
+namespaces and RBAC, then apply each TenantCluster object separately -- it is not
+templated, so that an upgrade cannot flip a tenant from Observe to Enforce.
+{{- end }}
+
+{{- $secretNames := list }}
+{{- range .Values.operator.config.clusters }}
+{{- if .token_ref }}
+{{- $secretNames = append $secretNames .token_ref.name }}
+{{- end }}
+{{- end }}
+{{- $secretNames = concat $secretNames .Values.operator.rbac.extraSecretNames | compact }}
+{{- if and .Values.operator.rbac.create (not $secretNames) }}
+
+WARNING
+-------
+The operator was granted `get` on every Secret in {{ .Release.Namespace }},
+because no token_ref names were visible to this chart -- which is what happens
+with `operator.existingConfigSecret`. Pin them to restore least privilege:
+
+  operator:
+    rbac:
+      extraSecretNames:
+        - proxmox-operator-token
+{{- end }}
+{{- if not .Values.operator.leaderElection.enabled }}
+
+WARNING
+-------
+Operator leader election is off. More than one replica can race against the same
+Proxmox cluster. Keep replicaCount at 1 or turn leader election back on.
+{{- end }}
+{{- end }}

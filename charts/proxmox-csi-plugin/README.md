@@ -1,6 +1,6 @@
 # proxmox-csi-plugin
 
-![Version: 0.19.0](https://img.shields.io/badge/Version-0.19.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.7.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.7.0-informational?style=flat-square)
+![Version: 0.24.0](https://img.shields.io/badge/Version-0.24.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.7.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.7.0-informational?style=flat-square)
 
 Container Storage Interface plugin for Proxmox
 
@@ -116,6 +116,13 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | configFile | string | `"/etc/proxmox/config.yaml"` | Proxmox cluster config path. |
 | config | object | `{"clusters":[],"features":{"provider":"default"}}` | Proxmox cluster config. ref: https://github.com/CrunchyMonkies/proxmox-csi-plugin/blob/main/docs/install.md |
 | storageClass | list | `[]` | Storage class definition. |
+| controller.enabled | bool | `true` | Enable the controller (CSI provisioner/attacher) deployment. |
+| controller.remote | object | `{"caSecret":"","enabled":false,"existingSecret":"","tokenURL":"","url":""}` | Remote mode: the controller talks to the operator's volume API instead of Proxmox directly. When enabled, the cloud-config Secret is not rendered. |
+| controller.remote.enabled | bool | `false` | Enable remote mode. |
+| controller.remote.url | string | `""` | Address of the operator volume API (host:port). |
+| controller.remote.tokenURL | string | `""` | OAuth2 token endpoint URL. |
+| controller.remote.existingSecret | string | `""` | Existing Secret with `clientId` and `clientSecret` keys. |
+| controller.remote.caSecret | string | `""` | Optional: existing Secret with a CA certificate (`ca.crt` key). |
 | controller.podAnnotations | object | `{}` | Annotations for controller pod. ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/ |
 | controller.podLabels | object | `{}` | Labels for controller pod. ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/ |
 | controller.annotateNodeInstanceID | bool | `false` | Write the resolved Proxmox VMID back to each node as a `proxmox.crunchymonkies.com/instance-id` annotation, so later lookups read the annotation instead of scanning every VM in the cluster. Also grants the controller `patch` on nodes. Only has an effect where the providerID carries no VMID — notably rke2, whose `rke2://<name>` is immutable. Leave off if a CCM already sets the providerID. |
@@ -136,6 +143,7 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | controller.snapshotter.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-snapshotter","tag":"v8.3.0"}` | CSI Snapshotter. refs: https://github.com/kubernetes-csi/external-snapshotter |
 | controller.snapshotter.args | list | `[]` | Snapshotter arguments. example: --feature-gates=CSIVolumeGroupSnapshot=true |
 | controller.snapshotter.resources | object | `{"requests":{"cpu":"10m","memory":"16Mi"}}` | Snapshotter resource requests and limits. ref: https://kubernetes.io/docs/user-guide/compute-resources/ |
+| node.enabled | bool | `true` | Enable the node (CSI node-driver) DaemonSet. |
 | node.kataDirectVolumes | object | `{"enabled":false,"handlerPrefix":"kata","root":"/run/kata-containers/shared/direct-volumes"}` | Kata Containers direct-assigned volumes: filesystem volumes of pods whose RuntimeClass handler starts with `handlerPrefix` are mounted inside the Kata VM instead of being shared over virtio-fs. A StorageClass opts out with the parameter `kataDirectVolume: "false"`. |
 | node.kataDirectVolumes.enabled | bool | `false` | Enable direct-assigned volumes for Kata pods. |
 | node.kataDirectVolumes.handlerPrefix | string | `"kata"` | RuntimeClass handler prefix of Kata runtimes. |
@@ -205,3 +213,54 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | migrator.rebalance.window | string | `""` | Maintenance window "HH:MM-HH:MM"; outside it the job exits immediately. |
 | migrator.rebalance.windowTz | string | `"UTC"` | IANA time zone for the maintenance window. |
 | migrator.rebalance.extraArgs | list | `[]` | Additional rebalance arguments. |
+| operator | object | `{"affinity":{},"config":{"clusters":[]},"dnsPolicy":"","drift":{"enabled":true,"interval":"30m"},"enabled":false,"existingConfigSecret":null,"existingConfigSecretKey":"config.yaml","extraArgs":[],"extraVolumeMounts":[],"extraVolumes":[],"hostAliases":[],"hostNetwork":false,"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/proxmox-csi-operator","tag":""},"leaderElection":{"enabled":true,"namespace":""},"logEncoder":"json","logLevel":"info","metrics":{"enabled":false,"port":8080,"service":{"annotations":{},"enabled":false},"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"metricRelabelings":[],"relabelings":[],"scrapeTimeout":""}},"nodeSelector":{},"podAnnotations":{},"podDisruptionBudget":{"enabled":false,"minAvailable":1},"podLabels":{},"podSecurityContext":{"fsGroup":65532,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":65532,"runAsNonRoot":true,"runAsUser":65532},"probePort":8081,"rbac":{"create":true,"extraSecretNames":[]},"replicaCount":1,"resources":{"requests":{"cpu":"20m","memory":"64Mi"}},"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}},"storage":{"syncPeriod":"1m"},"tenants":[],"tolerations":[],"topologySpreadConstraints":[],"updateStrategy":{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"},"volumeAPI":{"burst":20,"enabled":false,"gateway":{"enabled":false,"hostnames":[],"parentRefs":[]},"port":9090,"rateLimit":10}}` | Volume operator (proxmox-csi-operator). Watches ProxmoxVolume/TenantCluster CRDs and acts as the management-plane API for multi-cluster setups. Install this component on a dedicated management cluster that tenant workload clusters authenticate against. |
+| operator.enabled | bool | `false` | Enable the operator deployment and its supporting resources. |
+| operator.replicaCount | int | `1` | Number of operator replicas. Leader election ensures only one reconciles. |
+| operator.hostNetwork | bool | `false` | Run the operator pod in the host network namespace. Same rationale as `controller.hostNetwork`: where pod traffic cannot reach the Proxmox API (no NAT, or a firewall that only admits node addresses), the operator has to arrive as the node. Move `metrics.port` and `probePort` off ports the controller already binds on the node when combining the two. |
+| operator.dnsPolicy | string | `""` | DNS policy for the operator pod. Defaults to `ClusterFirstWithHostNet` when `hostNetwork` is on. |
+| operator.image.repository | string | `"ghcr.io/crunchymonkies/proxmox-csi-operator"` | Operator image. |
+| operator.image.pullPolicy | string | `"IfNotPresent"` | Always or IfNotPresent. |
+| operator.image.tag | string | `""` | Overrides the image tag whose default is the chart appVersion. |
+| operator.logLevel | string | `"info"` | Log level: debug, info, error. |
+| operator.logEncoder | string | `"json"` | Log format: json or console. |
+| operator.leaderElection.enabled | bool | `true` | Elect a leader before reconciling. |
+| operator.leaderElection.namespace | string | `""` | Namespace holding the lease. Defaults to the release namespace. |
+| operator.storage.syncPeriod | string | `"1m"` | How often the Proxmox storage catalog is republished as ProxmoxStorage objects. |
+| operator.drift.enabled | bool | `true` | Enable drift-detection sweeps. |
+| operator.drift.interval | string | `"30m"` | How often the estate is swept. |
+| operator.existingConfigSecret | string | `nil` | Existing Secret holding the cloud config (overrides operator.config). |
+| operator.existingConfigSecretKey | string | `"config.yaml"` | Key inside that Secret. |
+| operator.config | object | `{"clusters":[]}` | Proxmox cluster config rendered into a Secret. Inline token_secret / password are refused at template time: use token_ref. |
+| operator.tenants | list | `[]` | Tenant clusters to render namespace, Role, RoleBinding and ResourceQuota for. |
+| operator.rbac.create | bool | `true` | Render the operator's ClusterRole, Role and their bindings. |
+| operator.rbac.extraSecretNames | list | `[]` | Additional Secret names the operator may read in its own namespace. Needed when existingConfigSecret is used (chart cannot see token_ref names). |
+| operator.metrics | object | `{"enabled":false,"port":8080,"service":{"annotations":{},"enabled":false},"serviceMonitor":{"enabled":false,"interval":"30s","labels":{},"metricRelabelings":[],"relabelings":[],"scrapeTimeout":""}}` | Prometheus metrics. |
+| operator.metrics.enabled | bool | `false` | Enable the metrics listener. |
+| operator.metrics.port | int | `8080` | Metrics port. |
+| operator.metrics.service | object | `{"annotations":{},"enabled":false}` | Render a Service for the metrics port. |
+| operator.metrics.serviceMonitor | object | `{"enabled":false,"interval":"30s","labels":{},"metricRelabelings":[],"relabelings":[],"scrapeTimeout":""}` | Render a ServiceMonitor. Requires metrics.service.enabled. |
+| operator.probePort | int | `8081` | Health and readiness probe port. |
+| operator.podDisruptionBudget | object | `{"enabled":false,"minAvailable":1}` | PodDisruptionBudget for the operator. |
+| operator.resources | object | `{"requests":{"cpu":"20m","memory":"64Mi"}}` | Operator resource requests and limits. |
+| operator.podAnnotations | object | `{}` | Annotations for the operator pod. |
+| operator.podLabels | object | `{}` | Labels for the operator pod. |
+| operator.podSecurityContext | object | `{"fsGroup":65532,"fsGroupChangePolicy":"OnRootMismatch","runAsGroup":65532,"runAsNonRoot":true,"runAsUser":65532}` | Operator Pod Security Context. |
+| operator.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true,"seccompProfile":{"type":"RuntimeDefault"}}` | Operator Container Security Context. |
+| operator.updateStrategy | object | `{"rollingUpdate":{"maxUnavailable":1},"type":"RollingUpdate"}` | Deployment update strategy. |
+| operator.nodeSelector | object | `{}` | Node labels for operator assignment. |
+| operator.tolerations | list | `[]` | Tolerations for operator assignment. |
+| operator.affinity | object | `{}` | Affinity for operator assignment. |
+| operator.topologySpreadConstraints | list | `[]` | Topology spread constraints for the operator pods. |
+| operator.hostAliases | list | `[]` | hostAliases for the operator pod, for a Proxmox endpoint with no DNS. |
+| operator.extraVolumes | list | `[]` | Additional volumes for the operator pod. |
+| operator.extraVolumeMounts | list | `[]` | Additional volume mounts for the operator pod. |
+| operator.volumeAPI | object | `{"burst":20,"enabled":false,"gateway":{"enabled":false,"hostnames":[],"parentRefs":[]},"port":9090,"rateLimit":10}` | Volume API served by the operator for remote tenant clusters. |
+| operator.volumeAPI.enabled | bool | `false` | Enable the gRPC volume API. |
+| operator.volumeAPI.port | int | `9090` | Port for the volume API. |
+| operator.volumeAPI.rateLimit | int | `10` | Per-tenant rate limit (requests/second). |
+| operator.volumeAPI.burst | int | `20` | Per-tenant burst limit. |
+| operator.volumeAPI.gateway | object | `{"enabled":false,"hostnames":[],"parentRefs":[]}` | Gateway API GRPCRoute for the volume API. |
+| operator.volumeAPI.gateway.enabled | bool | `false` | Render a GRPCRoute. |
+| operator.volumeAPI.gateway.parentRefs | list | `[]` | Gateway parentRefs. |
+| operator.volumeAPI.gateway.hostnames | list | `[]` | Hostnames for the GRPCRoute. |
+| operator.extraArgs | list | `[]` | Additional arguments for the operator. |

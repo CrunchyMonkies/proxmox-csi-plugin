@@ -1,0 +1,208 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: proxmoxvolumesnapshots.csi.crunchymonkies.com
+spec:
+  group: csi.crunchymonkies.com
+  names:
+    categories:
+    - proxmox
+    kind: ProxmoxVolumeSnapshot
+    listKind: ProxmoxVolumeSnapshotList
+    plural: proxmoxvolumesnapshots
+    shortNames:
+    - pxsnap
+    - pxsnaps
+    singular: proxmoxvolumesnapshot
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.sourceVolumeName
+      name: Source
+      type: string
+    - jsonPath: .status.readyToUse
+      name: Ready
+      type: boolean
+    - jsonPath: .status.snapshotID
+      name: SnapshotID
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ProxmoxVolumeSnapshot is a point-in-time copy of a ProxmoxVolume.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ProxmoxVolumeSnapshotSpec asks for a point-in-time copy of a volume.
+
+              This is the kind that benefits most from the whole pattern. A snapshot is a
+              full disk copy with a 3600-second task timeout, so today CreateSnapshot is a
+              gRPC call that can block for an hour. Here the tenant returns as soon as
+              status.snapshotID is set and reports progress through readyToUse, which is
+              exactly what the CSI contract asks of a driver that does not implement
+              ListSnapshots.
+            properties:
+              claimRef:
+                description: ClaimRef records the tenant-side VolumeSnapshot this
+                  was created for.
+                properties:
+                  name:
+                    description: Name of the PVC in the tenant cluster.
+                    type: string
+                  namespace:
+                    description: Namespace of the PVC in the tenant cluster.
+                    type: string
+                  pvName:
+                    description: |-
+                      PVName is the PersistentVolume name, which is also this resource's own
+                      name. Carried for readability of `kubectl get -o wide` on the mgmt side.
+                    type: string
+                type: object
+              sourceVolumeName:
+                description: |-
+                  SourceVolumeName is the ProxmoxVolume being snapshotted, in this
+                  namespace. A name reference, never a raw handle -- same reason as
+                  VolumeSource.
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: sourceVolumeName is immutable
+                  rule: self == oldSelf
+              storage:
+                description: |-
+                  Storage is where the snapshot copy is written. Defaults to the source
+                  volume's storage; must be in the tenant's allowedStorages either way.
+                type: string
+                x-kubernetes-validations:
+                - message: storage is immutable
+                  rule: self == oldSelf
+              zone:
+                description: |-
+                  Zone is the target Proxmox node for cross-zone snapshot placement.
+                  Defaults to the source volume's zone when empty.
+                type: string
+                x-kubernetes-validations:
+                - message: zone is immutable
+                  rule: self == oldSelf
+            required:
+            - sourceVolumeName
+            type: object
+          status:
+            description: ProxmoxVolumeSnapshotStatus is written only by the operator.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              creationTime:
+                description: CreationTime is when Proxmox finished writing the copy.
+                format: date-time
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              readyToUse:
+                description: |-
+                  ReadyToUse reports that the copy finished. The tenant returns the handle
+                  before this flips; external-snapshotter polls for the rest.
+                type: boolean
+              restoreSizeBytes:
+                description: RestoreSize is the size a volume restored from this snapshot
+                  must be.
+                format: int64
+                type: integer
+              snapshotID:
+                description: |-
+                  SnapshotID is the CSI snapshot handle, same
+                  "<region>/<zone>/<storage>/<disk>" shape as a volume handle.
+                type: string
+              taskID:
+                description: |-
+                  TaskID is the Proxmox UPID of the in-flight copy, for correlating a slow
+                  snapshot with the hypervisor's own task log.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
