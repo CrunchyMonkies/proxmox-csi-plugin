@@ -1,0 +1,68 @@
+{{- if .Values.operator.enabled }}
+{{- if and .Values.operator.metrics.enabled .Values.operator.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+  {{- with .Values.operator.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: {{ .Values.operator.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "proxmox-csi-plugin-operator.selectorLabels" . | nindent 4 }}
+{{- end }}
+---
+{{- if .Values.operator.volumeAPI.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator-volume-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: {{ .Values.operator.volumeAPI.port }}
+      targetPort: volume-api
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+  selector:
+    {{- include "proxmox-csi-plugin-operator.selectorLabels" . | nindent 4 }}
+{{- end }}
+---
+{{- if and .Values.operator.volumeAPI.enabled .Values.operator.volumeAPI.gateway.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-volume-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  parentRefs:
+    {{- toYaml .Values.operator.volumeAPI.gateway.parentRefs | nindent 4 }}
+  {{- with .Values.operator.volumeAPI.gateway.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - backendRefs:
+        - name: {{ include "proxmox-csi-plugin.fullname" . }}-operator-volume-api
+          port: {{ .Values.operator.volumeAPI.port }}
+{{- end }}
+{{- end }}

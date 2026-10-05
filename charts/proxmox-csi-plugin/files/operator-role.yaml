@@ -1,0 +1,52 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxmox-csi-operator
+rules:
+- apiGroups:
+  - csi.crunchymonkies.com
+  resources:
+  - proxmoxstorages
+  - proxmoxvolumeattachments
+  - proxmoxvolumes
+  - proxmoxvolumesnapshots
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - csi.crunchymonkies.com
+  resources:
+  - proxmoxstorages/status
+  - proxmoxvolumeattachments/status
+  - proxmoxvolumes/status
+  - proxmoxvolumesnapshots/status
+  - tenantclusters/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - csi.crunchymonkies.com
+  resources:
+  - proxmoxvolumeattachments/finalizers
+  - proxmoxvolumes/finalizers
+  - proxmoxvolumesnapshots/finalizers
+  - tenantclusters/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - csi.crunchymonkies.com
+  resources:
+  - tenantclusters
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch

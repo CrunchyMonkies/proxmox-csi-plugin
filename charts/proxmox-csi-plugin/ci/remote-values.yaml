@@ -1,0 +1,34 @@
+# CI values exercising controller.remote and operator.volumeAPI.gateway.
+
+controller:
+  enabled: true
+  remote:
+    enabled: true
+    url: volumes.example.com:443
+    tokenURL: https://keycloak.example.com/realms/proxmox/protocol/openid-connect/token
+    existingSecret: keycloak-client
+
+node:
+  enabled: false
+
+operator:
+  enabled: true
+  config:
+    clusters:
+      - url: https://pve.example.com:8006/api2/json
+        insecure: false
+        region: BNE
+        token_ref:
+          name: proxmox-operator-token
+  volumeAPI:
+    enabled: true
+    port: 9090
+    rateLimit: 10
+    burst: 20
+    gateway:
+      enabled: true
+      parentRefs:
+        - name: shared
+          namespace: envoy-gateway-system
+      hostnames:
+        - volumes.example.com

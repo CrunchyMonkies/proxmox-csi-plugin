@@ -1,0 +1,322 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: proxmoxvolumes.csi.crunchymonkies.com
+spec:
+  group: csi.crunchymonkies.com
+  names:
+    categories:
+    - proxmox
+    kind: ProxmoxVolume
+    listKind: ProxmoxVolumeList
+    plural: proxmoxvolumes
+    shortNames:
+    - pxvol
+    - pxvols
+    singular: proxmoxvolume
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.storage
+      name: Storage
+      type: string
+    - format: byte
+      jsonPath: .status.capacityBytes
+      name: Capacity
+      type: integer
+    - jsonPath: .status.volumeID
+      name: VolumeID
+      priority: 1
+      type: string
+    - jsonPath: .status.adopted
+      name: Adopted
+      priority: 1
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: ProxmoxVolume is one Proxmox disk, owned by exactly one tenant
+          cluster.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ProxmoxVolumeSpec is a tenant's request for one Proxmox disk.
+
+              The object is named after the PersistentVolume name that CreateVolume was
+              called with (pvc-<uuid>), which is what makes provisioning idempotent under
+              CSI's at-least-once retry semantics: a retry finds the work already in flight
+              rather than allocating a second disk.
+            properties:
+              adopt:
+                description: |-
+                  Adopt takes ownership of a disk that already exists. The operator confirms
+                  the disk is there, records its real name, node and size, and publishes the
+                  existing handle verbatim -- it issues no create, no move, no rename and no
+                  attach. Adoption is pure bookkeeping, which is what makes the migration
+                  reversible with a single helm rollback.
+                type: boolean
+                x-kubernetes-validations:
+                - message: adopt is immutable
+                  rule: self == oldSelf
+              adoptVolumeID:
+                description: |-
+                  AdoptVolumeID is the pre-existing handle, exactly as it appears in the
+                  PersistentVolume's spec.csi.volumeHandle. Byte-identity here is the whole
+                  point: the node plugin must never notice that anything changed.
+                type: string
+                x-kubernetes-validations:
+                - message: adoptVolumeID is immutable
+                  rule: self == oldSelf
+              capacityBytes:
+                description: |-
+                  CapacityBytes is the requested size. Patched upward by
+                  ControllerExpandVolume; shrinking is rejected.
+                format: int64
+                minimum: 1
+                type: integer
+                x-kubernetes-validations:
+                - message: capacityBytes cannot shrink
+                  rule: self >= oldSelf
+              claimRef:
+                description: |-
+                  ClaimRef records which PVC in the tenant cluster this was provisioned for.
+                  Required when the tenant has namespaceQuotas configured -- the operator
+                  sets Admitted=False/MissingClaimRef rather than silently accounting a
+                  volume to nobody, because the usual cause is a provisioner started without
+                  --extra-create-metadata and that would be a quiet quota bypass.
+                properties:
+                  name:
+                    description: Name of the PVC in the tenant cluster.
+                    type: string
+                  namespace:
+                    description: Namespace of the PVC in the tenant cluster.
+                    type: string
+                  pvName:
+                    description: |-
+                      PVName is the PersistentVolume name, which is also this resource's own
+                      name. Carried for readability of `kubectl get -o wide` on the mgmt side.
+                    type: string
+                type: object
+              mutableParameters:
+                additionalProperties:
+                  type: string
+                description: |-
+                  MutableParameters are the VolumeAttributesClass parameters, written by
+                  ControllerModifyVolume. These are kept separate from creation Parameters
+                  because they can change after provisioning and are a different set of
+                  fields: see pkg/csi/parameters.go ExtractModifyVolumeParameters for the
+                  exact keys (backup, discard, diskIOPS, diskMBps and their per-direction
+                  variants).
+                type: object
+              parameters:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Parameters are the StorageClass parameters, filtered by the tenant's
+                  ParameterPolicy. Patched by ControllerModifyVolume.
+                type: object
+              region:
+                description: Region is the Proxmox region. Must match the tenant's
+                  registered region.
+                minLength: 1
+                type: string
+                x-kubernetes-validations:
+                - message: region is immutable
+                  rule: self == oldSelf
+              source:
+                description: Source clones an existing volume or restores a snapshot.
+                maxProperties: 1
+                minProperties: 1
+                properties:
+                  snapshotName:
+                    description: SnapshotName is a ProxmoxVolumeSnapshot in the same
+                      namespace.
+                    type: string
+                  volumeName:
+                    description: VolumeName is a ProxmoxVolume in the same namespace.
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: source is immutable
+                  rule: self == oldSelf
+              storage:
+                description: |-
+                  Storage is the Proxmox storage name. Must appear in the tenant's
+                  allowedStorages.
+
+                  Mutable for the same reason as Zone. Note that changing it changes the
+                  volumeID, since the handle encodes <region>/<zone>/<storage>/<disk> -- the
+                  operator republishes status.volumeID and sets Degraded=VolumeIDChanged, and
+                  the tenant-side migration controller rewrites the PV. The operator cannot
+                  reach the tenant's PV objects, by design.
+                minLength: 1
+                type: string
+              zone:
+                description: |-
+                  Zone is the Proxmox node. Empty for shared storage, where the disk is not
+                  pinned to a node.
+
+                  Unlike the other identity fields this is mutable: the migration controller
+                  patches it to move a volume between nodes.
+                type: string
+            required:
+            - capacityBytes
+            - region
+            - storage
+            type: object
+          status:
+            description: ProxmoxVolumeStatus is written only by the operator.
+            properties:
+              accessibleTopology:
+                description: |-
+                  AccessibleTopology is the list of zones where the volume is reachable,
+                  matching the topology returned by CreateVolume. A local storage has one
+                  zone; a shared storage may list several.
+                items:
+                  type: string
+                type: array
+              adopted:
+                description: |-
+                  Adopted records that this volume was taken over rather than created here.
+                  The delete path consults it: an adopted disk is only destroyed when the
+                  tenant is in Decommission mode.
+                type: boolean
+              capacityBytes:
+                description: |-
+                  CapacityBytes is the size Proxmox actually reports, which may exceed the
+                  request after rounding.
+                format: int64
+                type: integer
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              diskName:
+                description: |-
+                  DiskName is the Proxmox disk name, "vm-<vmid>-pvc-<uuid>" possibly with a
+                  format suffix. Re-read on every reconcile because the rename path can
+                  change it underneath us.
+                type: string
+              lastSyncTime:
+                description: LastSyncTime is when the operator last confirmed this
+                  against Proxmox.
+                format: date-time
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              ownerVmid:
+                description: |-
+                  OwnerVMID is the VMID currently embedded in the disk name: the tenant's
+                  placeholder when detached, the attached VM's ID when attached, or a legacy
+                  placeholder for an adopted disk.
+                format: int32
+                type: integer
+              phase:
+                description: |-
+                  VolumePhase is a coarse summary of ProxmoxVolumeStatus, for printer columns.
+                  Conditions remain the machine-readable truth.
+                enum:
+                - Pending
+                - Ready
+                - Migrating
+                - Rejected
+                - Failed
+                - Deleting
+                type: string
+              volumeID:
+                description: |-
+                  VolumeID is the CSI volume handle, "<region>/<zone>/<storage>/<disk>",
+                  returned to the tenant verbatim. Unique across all namespaces: the
+                  operator maintains a cluster-wide index and refuses a second claim on the
+                  same handle with Degraded=DuplicateClaim. Adopting every cluster before
+                  enforcing any is how you find out whether two clusters already share a
+                  disk today.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

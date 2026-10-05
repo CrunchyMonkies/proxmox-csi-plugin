@@ -1,0 +1,41 @@
+{{- if .Values.operator.enabled }}
+{{- if .Values.operator.metrics.serviceMonitor.enabled }}
+{{- if not (and .Values.operator.metrics.enabled .Values.operator.metrics.service.enabled) }}
+{{- fail "operator.metrics.serviceMonitor.enabled requires operator.metrics.enabled and operator.metrics.service.enabled" }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+    {{- with .Values.operator.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "proxmox-csi-plugin-operator.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    {{- range $path := list "/metrics" "/metrics/proxmox" }}
+    - port: metrics
+      path: {{ $path }}
+      interval: {{ $.Values.operator.metrics.serviceMonitor.interval }}
+      {{- with $.Values.operator.metrics.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- with $.Values.operator.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.operator.metrics.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

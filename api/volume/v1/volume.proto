@@ -1,0 +1,304 @@
+// Copyright 2023 The Kubernetes Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// The volume API served by the operator binary (ADR 6).
+//
+// Every request is authenticated by a Keycloak bearer token whose azp resolves
+// to exactly one TenantCluster and therefore one namespace. No field in this
+// proto carries a namespace, tenant identity or owner: those are derived from
+// the bearer token by the server and never accepted from the wire. This is the
+// reason a compromised tenant cannot name another tenant's namespace, and it is
+// load-bearing -- see volume-control-plane.md, "Authorization: four layers".
+
+syntax = "proto3";
+
+package proxmox.csi.volume.v1;
+
+option go_package = "github.com/sergelogvinov/proxmox-csi-plugin/pkg/apis/volume/v1;volumev1";
+
+import "google/protobuf/timestamp.proto";
+
+// VolumeService is the tenant-facing volume API.
+//
+// Each method maps one-to-one onto the CRD the operator reconciles: the server
+// writes the tenant's intent as a custom resource and returns once the
+// reconciler has acted on it or refused it. The proto lives at
+// api/volume/v1 and TLS terminates at Envoy Gateway with h2c to the pod.
+service VolumeService {
+  // CreateVolume provisions a new Proxmox disk or clones an existing one.
+  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+
+  // DeleteVolume removes a provisioned disk.
+  rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+
+  // ExpandVolume grows an existing disk. Shrinking is rejected.
+  rpc ExpandVolume(ExpandVolumeRequest) returns (ExpandVolumeResponse);
+
+  // ModifyVolume patches the mutable parameters (IO throttle, cache, etc.)
+  // on an attached volume.
+  rpc ModifyVolume(ModifyVolumeRequest) returns (ModifyVolumeResponse);
+
+  // AttachVolume attaches a disk to a VM, returning the device path and LUN
+  // the node plugin needs.
+  rpc AttachVolume(AttachVolumeRequest) returns (AttachVolumeResponse);
+
+  // DetachVolume detaches a disk from a VM.
+  rpc DetachVolume(DetachVolumeRequest) returns (DetachVolumeResponse);
+
+  // CreateSnapshot creates a point-in-time copy of a volume.
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+
+  // DeleteSnapshot removes a snapshot disk.
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+
+  // ListSnapshots returns the tenant's own snapshots.
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+
+  // WatchCapacity streams storage capacity updates filtered to the tenant's
+  // allowed storages. The tenant backend serves GetCapacity from this stream's
+  // informer cache.
+  rpc WatchCapacity(WatchCapacityRequest) returns (stream WatchCapacityResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Shared sub-messages
+// ---------------------------------------------------------------------------
+
+// ClaimRef identifies the PVC in the tenant cluster this volume was
+// provisioned for. Populated from csi.storage.k8s.io/pvc/{name,namespace}
+// when csi-provisioner is started with --extra-create-metadata.
+//
+// Tenant-asserted: see volume-control-plane.md, "Quotas: three layers".
+message ClaimRef {
+  string namespace = 1;
+  string name = 2;
+}
+
+// VolumeSource references content to populate a new volume from.
+// At most one field may be set.
+message VolumeSource {
+  // Name of a ProxmoxVolume in the tenant's namespace.
+  string volume_name = 1;
+  // Name of a ProxmoxVolumeSnapshot in the tenant's namespace.
+  string snapshot_name = 2;
+}
+
+// TopologyRequirement carries the zones (Proxmox nodes) the volume must be
+// accessible from.
+message TopologyRequirement {
+  repeated string zones = 1;
+}
+
+// ---------------------------------------------------------------------------
+// CreateVolume
+// ---------------------------------------------------------------------------
+
+message CreateVolumeRequest {
+  // name is the PersistentVolume name (pvc-<uuid>), which is also the
+  // ProxmoxVolume's name and what makes provisioning idempotent.
+  string name = 1;
+
+  // pv_name is carried for readability; it equals name today.
+  string pv_name = 2;
+
+  // claim_ref is the tenant-side PVC this was provisioned for.
+  ClaimRef claim_ref = 3;
+
+  string region = 4;
+  string zone = 5;
+  string storage = 6;
+  int64 capacity_bytes = 7;
+
+  // parameters are the StorageClass parameters, filtered by the tenant's
+  // ParameterPolicy.
+  map<string, string> parameters = 8;
+
+  // mutable_parameters are the VolumeAttributesClass parameters, kept
+  // separate from creation parameters.
+  map<string, string> mutable_parameters = 9;
+
+  // source clones an existing volume or restores from a snapshot.
+  VolumeSource source = 10;
+
+  // topology_requirement restricts the volume to the given zones.
+  TopologyRequirement topology_requirement = 11;
+}
+
+message CreateVolumeResponse {
+  string volume_id = 1;
+  int64 capacity_bytes = 2;
+
+  // accessible_topology lists the zones the volume is reachable from.
+  repeated string accessible_topology = 3;
+
+  // volume_context is the CSI VolumeContext the tenant's PV carries, exactly
+  // as direct mode's CreateVolume builds it. The node plugin reads mount-time
+  // settings from it (rootDirPermissions, filesystem options).
+  map<string, string> volume_context = 4;
+}
+
+// ---------------------------------------------------------------------------
+// DeleteVolume
+// ---------------------------------------------------------------------------
+
+message DeleteVolumeRequest {
+  string volume_id = 1;
+}
+
+message DeleteVolumeResponse {}
+
+// ---------------------------------------------------------------------------
+// ExpandVolume
+// ---------------------------------------------------------------------------
+
+message ExpandVolumeRequest {
+  string volume_id = 1;
+  int64 capacity_bytes = 2;
+}
+
+message ExpandVolumeResponse {
+  int64 capacity_bytes = 1;
+  bool node_expansion_required = 2;
+}
+
+// ---------------------------------------------------------------------------
+// ModifyVolume
+// ---------------------------------------------------------------------------
+
+message ModifyVolumeRequest {
+  string volume_id = 1;
+  map<string, string> mutable_parameters = 2;
+}
+
+message ModifyVolumeResponse {}
+
+// ---------------------------------------------------------------------------
+// AttachVolume
+// ---------------------------------------------------------------------------
+
+message AttachVolumeRequest {
+  string volume_id = 1;
+  string node_id = 2;
+  int32 vmid = 3;
+  bool readonly = 4;
+
+  // mutable_parameters lets the tenant apply a VolumeAttributesClass at
+  // attach time, which is the only moment the throttle can be written for a
+  // volume that was detached when the class was assigned.
+  map<string, string> mutable_parameters = 5;
+}
+
+message AttachVolumeResponse {
+  // device_path is the stable /dev/disk/by-id/wwn-0x... link.
+  string device_path = 1;
+
+  // lun is the SCSI index the disk was attached at.
+  int32 lun = 2;
+
+  // resize_required tells the node plugin to grow the filesystem after mount.
+  bool resize_required = 3;
+}
+
+// ---------------------------------------------------------------------------
+// DetachVolume
+// ---------------------------------------------------------------------------
+
+message DetachVolumeRequest {
+  string volume_id = 1;
+  string node_id = 2;
+  int32 vmid = 3;
+}
+
+message DetachVolumeResponse {}
+
+// ---------------------------------------------------------------------------
+// CreateSnapshot
+// ---------------------------------------------------------------------------
+
+message CreateSnapshotRequest {
+  // name is the VolumeSnapshot name, used to name the snapshot disk.
+  string name = 1;
+
+  // source_volume_name is a ProxmoxVolume in the tenant's namespace.
+  string source_volume_name = 2;
+
+  // zone overrides the snapshot's destination node when the storage is
+  // available on multiple nodes.
+  string zone = 3;
+}
+
+message CreateSnapshotResponse {
+  string snapshot_id = 1;
+  bool ready_to_use = 2;
+  int64 restore_size_bytes = 3;
+  google.protobuf.Timestamp creation_time = 4;
+}
+
+// ---------------------------------------------------------------------------
+// DeleteSnapshot
+// ---------------------------------------------------------------------------
+
+message DeleteSnapshotRequest {
+  string snapshot_id = 1;
+}
+
+message DeleteSnapshotResponse {}
+
+// ---------------------------------------------------------------------------
+// ListSnapshots
+// ---------------------------------------------------------------------------
+
+message ListSnapshotsRequest {
+  // source_volume_name filters to snapshots of one volume.
+  string source_volume_name = 1;
+
+  // snapshot_id filters to one specific snapshot.
+  string snapshot_id = 2;
+
+  int32 max_entries = 3;
+  string starting_token = 4;
+}
+
+message ListSnapshotsResponse {
+  message Entry {
+    string snapshot_id = 1;
+    string source_volume_id = 2;
+    bool ready_to_use = 3;
+    int64 restore_size_bytes = 4;
+    google.protobuf.Timestamp creation_time = 5;
+  }
+
+  repeated Entry entries = 1;
+  string next_token = 2;
+}
+
+// ---------------------------------------------------------------------------
+// WatchCapacity
+// ---------------------------------------------------------------------------
+
+message WatchCapacityRequest {
+  // storage filters to one storage name. Empty watches all allowed storages.
+  string storage = 1;
+
+  // zone filters to one Proxmox node. Empty watches all zones.
+  string zone = 2;
+}
+
+message WatchCapacityResponse {
+  string storage = 1;
+  string zone = 2;
+  int64 available_bytes = 3;
+  int64 total_bytes = 4;
+  bool shared = 5;
+}

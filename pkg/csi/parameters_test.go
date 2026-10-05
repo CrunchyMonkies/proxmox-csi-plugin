@@ -386,3 +386,48 @@ func Test_MergeMap(t *testing.T) {
 		})
 	}
 }
+
+// TestVolumeContextMatchesCreateVolume pins VolumeContext to the contexts
+// ControllerService.CreateVolume is asserted to return in controller_test.go,
+// so the volume operator's remote volumes keep carrying what direct volumes do.
+func TestVolumeContextMatchesCreateVolume(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		parameters map[string]string
+		mutable    map[string]string
+		expected   map[string]string
+	}{
+		{
+			name:       "defaults, as TestCreateVolume's volParamDefaults",
+			parameters: map[string]string{"storage": "local-lvm"},
+			expected:   map[string]string{"backup": "0", "iothread": "1", "storage": "local-lvm", "replicate": "0"},
+		},
+		{
+			name: "syd1 StorageClass",
+			parameters: map[string]string{
+				"storage": "local", "storageFormat": "raw", "ssd": "true", "backup": "true",
+				"cache": "none", "aio": "native", "diskMBps": "150", "diskIOPS": "3000",
+				"rootDirPermissions": "0777",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := csi.VolumeContext(tc.parameters, tc.mutable)
+			assert.NoError(t, err)
+
+			if tc.expected != nil {
+				assert.Equal(t, tc.expected, got)
+
+				return
+			}
+
+			// The node plugin reads these from the context at mount time.
+			assert.Equal(t, "0777", got["rootDirPermissions"])
+			assert.Equal(t, "local", got["storage"])
+		})
+	}
+}

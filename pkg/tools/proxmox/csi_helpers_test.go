@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package csi
+package proxmox
 
 import (
 	"context"
@@ -77,7 +77,7 @@ func TestIsVolumeAttached(t *testing.T) {
 		t.Run(fmt.Sprint(testCase.msg), func(t *testing.T) {
 			t.Parallel()
 
-			lun, exist := isVolumeAttached(testCase.vmConfig, testCase.pvc)
+			lun, exist := IsVolumeAttached(testCase.vmConfig, testCase.pvc)
 
 			if testCase.expectedExist {
 				assert.True(t, exist)
@@ -90,10 +90,10 @@ func TestIsVolumeAttached(t *testing.T) {
 	}
 }
 
-// TestCopyVolume covers the two things copyVolume still owns now that the
-// request building lives in toolsproxmox.MoveQemuDisk: its guards, and that the
+// TestCopyVolume covers the two things CopyVolume still owns now that the
+// request building lives in MoveQemuDisk: its guards, and that the
 // caller's chosen endpoint actually reaches the wire. The per-endpoint request
-// shapes are pinned in pkg/tools/proxmox's TestMoveQemuDiskRouting.
+// shapes are pinned in TestMoveQemuDiskRouting.
 func TestCopyVolume(t *testing.T) {
 	t.Parallel()
 
@@ -103,7 +103,7 @@ func TestCopyVolume(t *testing.T) {
 		t.Parallel()
 
 		nodeless := volume.NewVolume("cluster-1", "", "local-lvm", "vm-9999-disk-0")
-		err := copyVolume(context.Background(), nil, nodeless, src, pxpool.CopyEndpointBuiltin)
+		err := CopyVolume(context.Background(), nil, nodeless, src, pxpool.CopyEndpointBuiltin)
 		assert.EqualError(t, err, "node is required")
 	})
 
@@ -111,7 +111,7 @@ func TestCopyVolume(t *testing.T) {
 		t.Parallel()
 
 		dst := volume.NewVolume("cluster-1", "pve-2", "datastore1", "9999/vm-9999-disk-0.qcow2")
-		err := copyVolume(context.Background(), nil, src, dst, pxpool.CopyEndpointBuiltin)
+		err := CopyVolume(context.Background(), nil, src, dst, pxpool.CopyEndpointBuiltin)
 		assert.EqualError(t, err, "volume disk must not be qcow2 format")
 	})
 
@@ -157,7 +157,7 @@ func TestCopyVolume(t *testing.T) {
 
 			dst := volume.NewVolume("cluster-1", "pve-2", "datastore1", "vm-9999-disk-0")
 
-			require.NoError(t, copyVolume(context.Background(), cl, src, dst, tt.endpoint))
+			require.NoError(t, CopyVolume(context.Background(), cl, src, dst, tt.endpoint))
 			assert.Equal(t, tt.wantPath, gotPath)
 		})
 	}
@@ -165,11 +165,11 @@ func TestCopyVolume(t *testing.T) {
 
 // TestCopyTaskTimeout guards the one number the delegation to MoveQemuDisk
 // could quietly lose. MoveQemuDisk derives its poll count as taskTimeout/15,
-// and copyVolume previously waited 240 polls x 15s by hand, so anything other
+// and CopyVolume previously waited 240 polls x 15s by hand, so anything other
 // than 3600 shortens a snapshot copy's budget — passing the old literal 4*60
 // would cut a 60-minute wait to 4 minutes.
 func TestCopyTaskTimeout(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, 240*15, copyTaskTimeout)
+	assert.Equal(t, 240*15, CopyTaskTimeout)
 }

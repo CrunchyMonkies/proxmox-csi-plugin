@@ -1,3 +1,4 @@
+{{- if .Values.node.enabled }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -158,3 +159,4 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}

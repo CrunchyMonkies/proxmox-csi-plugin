@@ -115,6 +115,23 @@ storageClass: []
   #       - pve-3
 
 controller:
+  # -- Enable the controller (CSI provisioner/attacher) deployment.
+  enabled: true
+
+  # -- Remote mode: the controller talks to the operator's volume API instead of
+  # Proxmox directly. When enabled, the cloud-config Secret is not rendered.
+  remote:
+    # -- Enable remote mode.
+    enabled: false
+    # -- Address of the operator volume API (host:port).
+    url: ""
+    # -- OAuth2 token endpoint URL.
+    tokenURL: ""
+    # -- Existing Secret with `clientId` and `clientSecret` keys.
+    existingSecret: ""
+    # -- Optional: existing Secret with a CA certificate (`ca.crt` key).
+    caSecret: ""
+
   # -- Annotations for controller pod.
   # ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
   podAnnotations: {}
@@ -229,6 +246,9 @@ controller:
         memory: 16Mi
 
 node:
+  # -- Enable the node (CSI node-driver) DaemonSet.
+  enabled: true
+
   # -- Kata Containers direct-assigned volumes: filesystem volumes of pods whose RuntimeClass
   # handler starts with `handlerPrefix` are mounted inside the Kata VM instead of being shared
   # over virtio-fs. A StorageClass opts out with the parameter `kataDirectVolume: "false"`.
@@ -546,3 +566,204 @@ migrator:
     windowTz: "UTC"
     # -- Additional rebalance arguments.
     extraArgs: []
+
+# -- Volume operator (proxmox-csi-operator).
+# Watches ProxmoxVolume/TenantCluster CRDs and acts as the management-plane API
+# for multi-cluster setups. Install this component on a dedicated management
+# cluster that tenant workload clusters authenticate against.
+operator:
+  # -- Enable the operator deployment and its supporting resources.
+  enabled: false
+
+  # -- Number of operator replicas. Leader election ensures only one reconciles.
+  replicaCount: 1
+
+  # -- Run the operator pod in the host network namespace. Same rationale as
+  # `controller.hostNetwork`: where pod traffic cannot reach the Proxmox API
+  # (no NAT, or a firewall that only admits node addresses), the operator has
+  # to arrive as the node. Move `metrics.port` and `probePort` off ports the
+  # controller already binds on the node when combining the two.
+  hostNetwork: false
+
+  # -- DNS policy for the operator pod. Defaults to `ClusterFirstWithHostNet`
+  # when `hostNetwork` is on.
+  dnsPolicy: ""
+
+  image:
+    # -- Operator image.
+    repository: ghcr.io/crunchymonkies/proxmox-csi-operator
+    # -- Always or IfNotPresent.
+    pullPolicy: IfNotPresent
+    # -- Overrides the image tag whose default is the chart appVersion.
+    tag: ""
+
+  # -- Log level: debug, info, error.
+  logLevel: info
+
+  # -- Log format: json or console.
+  logEncoder: json
+
+  leaderElection:
+    # -- Elect a leader before reconciling.
+    enabled: true
+    # -- Namespace holding the lease. Defaults to the release namespace.
+    namespace: ""
+
+  storage:
+    # -- How often the Proxmox storage catalog is republished as ProxmoxStorage objects.
+    syncPeriod: 1m
+
+  drift:
+    # -- Enable drift-detection sweeps.
+    enabled: true
+    # -- How often the estate is swept.
+    interval: 30m
+
+  # -- Existing Secret holding the cloud config (overrides operator.config).
+  existingConfigSecret: ~
+  # -- Key inside that Secret.
+  existingConfigSecretKey: config.yaml
+
+  # -- Proxmox cluster config rendered into a Secret.
+  # Inline token_secret / password are refused at template time: use token_ref.
+  config:
+    clusters: []
+    #   - url: https://pve.example.com:8006/api2/json
+    #     insecure: false
+    #     region: BNE
+    #     token_ref:
+    #       name: proxmox-operator-token
+
+  # -- Tenant clusters to render namespace, Role, RoleBinding and ResourceQuota for.
+  tenants: []
+  # - name: bne1-cluster1
+  #   # Defaults to "tenant-<name>".
+  #   namespace: tenant-bne1-cluster1
+  #   # Object-count fuse per tenant.
+  #   quotaObjectCount: 500
+
+  rbac:
+    # -- Render the operator's ClusterRole, Role and their bindings.
+    create: true
+    # -- Additional Secret names the operator may read in its own namespace.
+    # Needed when existingConfigSecret is used (chart cannot see token_ref names).
+    extraSecretNames: []
+
+  # -- Prometheus metrics.
+  metrics:
+    # -- Enable the metrics listener.
+    enabled: false
+    # -- Metrics port.
+    port: 8080
+    # -- Render a Service for the metrics port.
+    service:
+      enabled: false
+      annotations: {}
+    # -- Render a ServiceMonitor. Requires metrics.service.enabled.
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: ""
+      labels: {}
+      relabelings: []
+      metricRelabelings: []
+
+  # -- Health and readiness probe port.
+  probePort: 8081
+
+  # -- PodDisruptionBudget for the operator.
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+    # maxUnavailable: 1
+
+  # -- Operator resource requests and limits.
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+
+  # -- Annotations for the operator pod.
+  podAnnotations: {}
+
+  # -- Labels for the operator pod.
+  podLabels: {}
+
+  # -- Operator Pod Security Context.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    fsGroupChangePolicy: OnRootMismatch
+
+  # -- Operator Container Security Context.
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+    readOnlyRootFilesystem: true
+
+  # -- Deployment update strategy.
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  # -- Node labels for operator assignment.
+  nodeSelector: {}
+    # node-role.kubernetes.io/control-plane: ""
+
+  # -- Tolerations for operator assignment.
+  tolerations: []
+    # - key: node-role.kubernetes.io/control-plane
+    #   effect: NoSchedule
+
+  # -- Affinity for operator assignment.
+  affinity: {}
+
+  # -- Topology spread constraints for the operator pods.
+  topologySpreadConstraints: []
+
+  # -- hostAliases for the operator pod, for a Proxmox endpoint with no DNS.
+  hostAliases: []
+    # - ip: 10.1.2.4
+    #   hostnames:
+    #     - pve.example.com
+
+  # -- Additional volumes for the operator pod.
+  extraVolumes: []
+  # - name: ca
+  #   secret:
+  #     secretName: proxmox-ca
+
+  # -- Additional volume mounts for the operator pod.
+  extraVolumeMounts: []
+  # - mountPath: /etc/ssl/certs/proxmox-ca.crt
+  #   name: ca
+  #   subPath: ca.crt
+
+  # -- Volume API served by the operator for remote tenant clusters.
+  volumeAPI:
+    # -- Enable the gRPC volume API.
+    enabled: false
+    # -- Port for the volume API.
+    port: 9090
+    # -- Per-tenant rate limit (requests/second).
+    rateLimit: 10
+    # -- Per-tenant burst limit.
+    burst: 20
+    # -- Gateway API GRPCRoute for the volume API.
+    gateway:
+      # -- Render a GRPCRoute.
+      enabled: false
+      # -- Gateway parentRefs.
+      parentRefs: []
+      # -- Hostnames for the GRPCRoute.
+      hostnames: []
+
+  # -- Additional arguments for the operator.
+  extraArgs: []

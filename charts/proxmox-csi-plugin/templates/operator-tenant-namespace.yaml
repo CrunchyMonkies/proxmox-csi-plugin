@@ -1,0 +1,35 @@
+{{- if .Values.operator.enabled }}
+{{- /*
+Per-tenant namespace: where the operator's volume API writes a tenant's
+ProxmoxVolume, ProxmoxVolumeAttachment and ProxmoxVolumeSnapshot objects.
+
+No Role, RoleBinding or catalog ClusterRole: tenants hold no Kubernetes identity
+on the management cluster (ADR 3). They call the volume API with their Keycloak
+client, and the operator writes here with its own ServiceAccount.
+
+Does NOT render the tenant's TenantCluster object: that carries the policy
+payload (mode, quotas, VMID allowlists) and templating it would let a routine
+`helm upgrade` flip a tenant from Observe to Enforce.
+*/ -}}
+{{- $root := . }}
+{{- $seenNamespaces := dict }}
+{{- range $i, $tenant := .Values.operator.tenants }}
+{{- if not $tenant.name }}
+{{- fail (printf "operator.tenants[%d] has no name" $i) }}
+{{- end }}
+{{- $ns := include "proxmox-csi-plugin-operator.tenantNamespace" $tenant }}
+{{- if hasKey $seenNamespaces $ns }}
+{{- fail (printf "operator.tenants[%d] (%s) reuses namespace %q, already claimed by %q" $i $tenant.name $ns (get $seenNamespaces $ns)) }}
+{{- end }}
+{{- $_ := set $seenNamespaces $ns $tenant.name }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $ns }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" $root | nindent 4 }}
+    csi.crunchymonkies.com/tenant: {{ $tenant.name }}
+    pod-security.kubernetes.io/enforce: restricted
+{{- end }}
+{{- end }}

@@ -1,3 +1,4 @@
+{{- if .Values.controller.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -57,9 +58,19 @@ spec:
           args:
             - "-v={{ .Values.logVerbosityLevel }}"
             - "--csi-address=unix:///csi/csi.sock"
+            {{- if .Values.controller.remote.enabled }}
+            - "--remote-volume-api={{ .Values.controller.remote.url }}"
+            - "--remote-token-url={{ .Values.controller.remote.tokenURL }}"
+            - "--remote-client-id-file=/etc/remote-credentials/clientId"
+            - "--remote-client-secret-file=/etc/remote-credentials/clientSecret"
+            {{- if .Values.controller.remote.caSecret }}
+            - "--remote-ca-file=/etc/remote-ca/ca.crt"
+            {{- end }}
+            {{- else }}
             - "--cloud-config={{ .Values.configFile }}"
             {{- if .Values.controller.annotateNodeInstanceID }}
             - "--annotate-node-instance-id"
+            {{- end }}
             {{- end }}
             {{- if .Values.metrics.enabled }}
             - "--metrics-address=:{{ .Values.metrics.port }}"
@@ -75,8 +86,19 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
+            {{- if .Values.controller.remote.enabled }}
+            - name: remote-credentials
+              mountPath: /etc/remote-credentials
+              readOnly: true
+            {{- if .Values.controller.remote.caSecret }}
+            - name: remote-ca
+              mountPath: /etc/remote-ca
+              readOnly: true
+            {{- end }}
+            {{- else }}
             - name: cloud-config
               mountPath: /etc/proxmox/
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -110,6 +132,9 @@ spec:
             {{- if .Values.options.enableCapacity }}
             - "--enable-capacity"
             - "--capacity-ownerref-level=2"
+            {{- end }}
+            {{- if .Values.controller.remote.enabled }}
+            - "--extra-create-metadata"
             {{- end }}
             {{- range .Values.controller.provisioner.args }}
             - {{ . | quote }}
@@ -179,6 +204,16 @@ spec:
       volumes:
         - name: socket-dir
           emptyDir: {}
+        {{- if .Values.controller.remote.enabled }}
+        - name: remote-credentials
+          secret:
+            secretName: {{ .Values.controller.remote.existingSecret }}
+        {{- if .Values.controller.remote.caSecret }}
+        - name: remote-ca
+          secret:
+            secretName: {{ .Values.controller.remote.caSecret }}
+        {{- end }}
+        {{- else }}
         {{- if .Values.existingConfigSecret }}
         - name: cloud-config
           secret:
@@ -190,6 +225,7 @@ spec:
         - name: cloud-config
           secret:
             secretName: {{ include "proxmox-csi-plugin.fullname" . }}
+        {{- end }}
         {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
@@ -213,3 +249,4 @@ spec:
           labelSelector:
             matchLabels:
               {{- include "proxmox-csi-plugin.selectorLabels" . | nindent 14 }}
+{{- end }}

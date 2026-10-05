@@ -1,0 +1,24 @@
+{{- if .Values.operator.enabled }}
+{{- if .Values.operator.podDisruptionBudget.enabled }}
+{{- if and .Values.operator.podDisruptionBudget.minAvailable (ge (int .Values.operator.podDisruptionBudget.minAvailable) (int .Values.operator.replicaCount)) }}
+{{- fail (printf "operator.podDisruptionBudget.minAvailable (%v) is not below operator.replicaCount (%v), which blocks every voluntary eviction. Raise replicaCount or use maxUnavailable." .Values.operator.podDisruptionBudget.minAvailable .Values.operator.replicaCount) }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.operator.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ . }}
+  {{- end }}
+  {{- with .Values.operator.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ . }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "proxmox-csi-plugin-operator.selectorLabels" . | nindent 6 }}
+{{- end }}
+{{- end }}

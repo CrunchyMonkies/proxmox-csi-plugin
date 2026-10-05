@@ -65,12 +65,16 @@ build-pvecsictl:
 	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build $(GO_LDFLAGS) \
 		-o bin/pvecsictl-$(ARCH) ./cmd/pvecsictl
 
+build-volume-operator:
+	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build $(GO_LDFLAGS) \
+		-o bin/proxmox-csi-operator-$(ARCH) ./cmd/volume-operator
+
 build-%:
 	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build $(GO_LDFLAGS) \
 		-o bin/proxmox-csi-$*-$(ARCH) ./cmd/$*
 
 .PHONY: build
-build: build-controller build-node build-pvecsictl ## Build
+build: build-controller build-node build-pvecsictl build-volume-operator ## Build
 
 .PHONY: run
 run: build-controller ## Run
@@ -92,16 +96,66 @@ test: lint unit ## Run all tests
 licenses:
 	go-licenses check ./... --disallowed_types=forbidden,restricted,unknown
 
+# The volume operator holds a management-cluster credential, so the CSI binaries
+# must not link it (or controller-runtime) in. Keeping the credential path inside
+# cmd/volume-operator and pkg/operator is what makes it auditable on its own.
+.PHONY: operator-isolation
+operator-isolation: ## Fail if the CSI binaries import the volume operator
+	@out="$$(go list -deps ./cmd/controller ./cmd/node ./cmd/pvecsictl | \
+		grep -E '^(sigs.k8s.io/controller-runtime|github.com/sergelogvinov/proxmox-csi-plugin/pkg/operator)(/|$$)')"; \
+		test -z "$$out" || { echo "CSI binaries import operator code:"; echo "$$out"; exit 1; }
+
 .PHONY: conformance
 conformance: ## Conformance
 	docker run --rm -it -v $(PWD):/src -w /src ghcr.io/siderolabs/conform:v0.1.0-alpha.31 enforce
+
+############
+#
+# Code generation (volume operator)
+#
+# controller-gen's version is pinned by the go.mod `tool` directive, so CI cannot
+# drift from a developer's local version.
+
+OPERATOR_CHART := charts/proxmox-csi-plugin
+
+.PHONY: generate
+generate: ## Generate deepcopy methods for the operator API types
+	go tool controller-gen object:headerFile=hack/boilerplate.go.txt paths=./pkg/apis/...
+
+.PHONY: manifests
+manifests: ## Generate the operator CRDs and ClusterRole into the chart
+	go tool controller-gen crd paths=./pkg/apis/... output:crd:artifacts:config=$(OPERATOR_CHART)/files/crds
+	# The cluster-scoped half of the operator's permissions is generated from the
+	# +kubebuilder:rbac markers next to the controllers that need it, so the chart
+	# cannot grant more than the code asked for. The namespaced half -- leases,
+	# events, the credential Secret -- is hand-written in operator-role.yaml,
+	# because controller-gen would fold it into this same ClusterRole and hand the
+	# operator cluster-wide Secret reads.
+	go tool controller-gen rbac:roleName=proxmox-csi-operator paths=./pkg/operator/... \
+		output:rbac:stdout > $(OPERATOR_CHART)/files/operator-role.yaml
+
+.PHONY: proto
+proto: ## Generate Go code from protobuf definitions
+	go tool buf generate
+
+# --porcelain rather than `git diff`, because newly generated files are untracked
+# and a plain diff would not see them.
+.PHONY: generate-check
+generate-check: generate manifests proto ## Fail if generated output is stale or uncommitted
+	@out="$$(git status --porcelain -- pkg/apis $(OPERATOR_CHART)/files)"; \
+		test -z "$$out" || { \
+			echo "generated output is stale or uncommitted, run 'make generate manifests proto':"; \
+			echo "$$out"; exit 1; }
 
 ############
 
 .PHONY: helm-unit
 helm-unit: ## Helm Unit Tests
 	@helm lint charts/proxmox-csi-plugin
-	@helm template -f charts/proxmox-csi-plugin/ci/values.yaml proxmox-csi-plugin charts/proxmox-csi-plugin >/dev/null
+	@for values in charts/proxmox-csi-plugin/ci/*values.yaml; do \
+		echo "helm template $$values"; \
+		helm template -f "$$values" proxmox-csi-plugin charts/proxmox-csi-plugin >/dev/null || exit 1; \
+	done
 
 .PHONY: helm-login
 helm-login: ## Helm Login
@@ -163,12 +217,14 @@ images-checks: images image-tools-check
 	trivy image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL --no-progress $(OCIREPO)/proxmox-csi-controller:$(TAG)
 	trivy image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL --no-progress $(OCIREPO)/proxmox-csi-node:$(TAG)
 	trivy image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL --no-progress $(OCIREPO)/pvecsictl:$(TAG)
+	trivy image --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL --no-progress $(OCIREPO)/proxmox-csi-operator:$(TAG)
 
 .PHONY: images-cosign
 images-cosign:
 	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/proxmox-csi-controller:$(TAG)
 	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/proxmox-csi-node:$(TAG)
 	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/pvecsictl:$(TAG)
+	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/proxmox-csi-operator:$(TAG)
 
 .PHONY: images
-images: image-proxmox-csi-controller image-proxmox-csi-node image-pvecsictl ## Build images
+images: image-proxmox-csi-controller image-proxmox-csi-node image-pvecsictl image-proxmox-csi-operator ## Build images

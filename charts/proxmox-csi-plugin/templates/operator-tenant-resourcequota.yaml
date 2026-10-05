@@ -1,0 +1,31 @@
+{{- if .Values.operator.enabled }}
+{{- /*
+Quota layer 1 of three, and the only one that is both synchronous and race-free:
+the apiserver's own quota admission plugin re-reads and retries the quota object
+on conflict, which no controller-side check can do.
+
+Counts objects, not bytes -- the capacity budget lives in
+TenantCluster.spec.quota where the operator enforces it. Treat this as a fuse
+against a runaway provisioner loop, not as a business rule.
+*/ -}}
+{{- $root := . }}
+{{- range $i, $tenant := .Values.operator.tenants }}
+{{- if $tenant.quotaObjectCount }}
+{{- $ns := include "proxmox-csi-plugin-operator.tenantNamespace" $tenant }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: proxmox-csi-tenant
+  namespace: {{ $ns }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" $root | nindent 4 }}
+    csi.crunchymonkies.com/tenant: {{ $tenant.name }}
+spec:
+  hard:
+    count/proxmoxvolumes.csi.crunchymonkies.com: {{ $tenant.quotaObjectCount }}
+    count/proxmoxvolumeattachments.csi.crunchymonkies.com: {{ $tenant.quotaObjectCount }}
+    count/proxmoxvolumesnapshots.csi.crunchymonkies.com: {{ $tenant.quotaObjectCount }}
+{{- end }}
+{{- end }}
+{{- end }}

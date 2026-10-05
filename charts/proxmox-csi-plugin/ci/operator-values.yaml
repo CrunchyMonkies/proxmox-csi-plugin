@@ -1,0 +1,45 @@
+# CI values for an operator-only install (no CSI controller or node plugin).
+# Exercises: operator.enabled=true, CRD rendering, tenant RBAC, metrics, PDB.
+
+controller:
+  enabled: false
+
+node:
+  enabled: false
+
+operator:
+  enabled: true
+  replicaCount: 2
+
+  config:
+    clusters:
+      - url: https://pve.example.com:8006/api2/json
+        insecure: false
+        region: BNE
+        token_ref:
+          name: proxmox-operator-token
+
+  tenants:
+    - name: bne1-cluster1
+      quotaObjectCount: 500
+    - name: syd1-mgt1
+      namespace: tenant-syd1-mgt1
+      quotaObjectCount: 100
+
+  metrics:
+    enabled: true
+    service:
+      enabled: true
+    serviceMonitor:
+      enabled: true
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+  nodeSelector:
+    node-role.kubernetes.io/control-plane: ""
+
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
