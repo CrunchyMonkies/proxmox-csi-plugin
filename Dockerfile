@@ -94,6 +94,24 @@ ENTRYPOINT ["/bin/proxmox-csi-node"]
 
 ########################################
 
+FROM builder AS builder-windows
+RUN make build-node-windows
+
+########################################
+
+# HostProcess containers run on the host and share no OS layer with it, so one image
+# serves every Windows Server version. Built by `make image-proxmox-csi-node-windows`.
+FROM mcr.microsoft.com/oss/kubernetes/windows-host-process-containers-base-image:v1.0.0 AS proxmox-csi-node-windows
+LABEL org.opencontainers.image.source="https://github.com/sergelogvinov/proxmox-csi-plugin" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.description="Proxmox VE CSI plugin for Windows nodes"
+
+COPY --from=builder-windows /src/bin/proxmox-csi-node-windows-amd64.exe /proxmox-csi-node.exe
+
+ENTRYPOINT ["proxmox-csi-node.exe"]
+
+########################################
+
 FROM alpine:3.24 AS pvecsictl
 LABEL org.opencontainers.image.source="https://github.com/sergelogvinov/proxmox-csi-plugin" \
       org.opencontainers.image.licenses="Apache-2.0" \

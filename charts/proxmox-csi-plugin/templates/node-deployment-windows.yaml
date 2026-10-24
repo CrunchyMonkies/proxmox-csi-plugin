@@ -1,0 +1,97 @@
+{{- if and .Values.node.enabled .Values.node.windows.enabled }}
+{{- /*
+Windows nodes run the node plugin as a HostProcess pod: every container is a process on
+the host, sees the host filesystem directly and needs no volume mounts. All paths below
+are host paths.
+*/}}
+{{- $kubeletDir := .Values.node.windows.kubeletDir | replace "/" "\\" | trimSuffix "\\" }}
+{{- $socketDir := printf "%s\\plugins\\%s" $kubeletDir .Values.provisionerName }}
+{{- /* unix:C:/… — gRPC rejects the drive letter as an authority in unix://C:/… */}}
+{{- $endpoint := printf "unix:%s/csi.sock" ($socketDir | replace "\\" "/") }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "proxmox-csi-plugin.fullname" . }}-node-windows
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "proxmox-csi-plugin.labels" . | nindent 4 }}
+spec:
+  updateStrategy:
+    type: {{ .Values.updateStrategy.type }}
+  selector:
+    matchLabels:
+      {{- include "proxmox-csi-plugin-node-windows.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "proxmox-csi-plugin-node-windows.selectorLabels" . | nindent 8 }}
+        {{- with default .Values.podLabels -}}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      priorityClassName: system-node-critical
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      enableServiceLinks: false
+      serviceAccountName: {{ include "proxmox-csi-plugin.serviceAccountName" . }}-node
+      hostNetwork: true
+      securityContext:
+        windowsOptions:
+          hostProcess: true
+          runAsUserName: "NT AUTHORITY\\SYSTEM"
+      containers:
+        - name: {{ include "proxmox-csi-plugin.fullname" . }}-node
+          image: "{{ .Values.node.windows.plugin.image.repository }}:{{ .Values.node.windows.plugin.image.tag | default (printf "%s-windows" .Chart.AppVersion) }}"
+          imagePullPolicy: {{ .Values.node.windows.plugin.image.pullPolicy }}
+          command:
+            - proxmox-csi-node.exe
+          args:
+            - "-v={{ .Values.logVerbosityLevel }}"
+            - "--csi-address={{ $endpoint }}"
+            - "--node-id=$(NODE_NAME)"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources: {{- toYaml .Values.node.windows.plugin.resources | nindent 12 }}
+        - name: csi-node-driver-registrar
+          image: "{{ .Values.node.driverRegistrar.image.repository }}:{{ .Values.node.driverRegistrar.image.tag }}"
+          imagePullPolicy: {{ .Values.node.driverRegistrar.image.pullPolicy }}
+          command:
+            - csi-node-driver-registrar.exe
+          args:
+            - "-v={{ .Values.logVerbosityLevel }}"
+            - "--csi-address={{ $endpoint }}"
+            - {{ printf "--kubelet-registration-path=%s\\csi.sock" $socketDir | squote }}
+            - {{ printf "--plugin-registration-path=%s\\plugins_registry" $kubeletDir | squote }}
+            {{- range .Values.node.driverRegistrar.args }}
+            - {{ . | quote }}
+            {{- end }}
+          resources: {{- toYaml .Values.node.driverRegistrar.resources | nindent 12 }}
+        - name: liveness-probe
+          image: "{{ .Values.livenessprobe.image.repository }}:{{ .Values.livenessprobe.image.tag }}"
+          imagePullPolicy: {{ .Values.livenessprobe.image.pullPolicy }}
+          command:
+            - livenessprobe.exe
+          args:
+            - "-v={{ .Values.logVerbosityLevel }}"
+            - "--csi-address={{ $endpoint }}"
+          resources: {{- toYaml .Values.livenessprobe.resources | nindent 12 }}
+      nodeSelector:
+        {{- toYaml (merge (deepCopy (.Values.node.windows.nodeSelector | default dict)) (dict "kubernetes.io/os" "windows")) | nindent 8 }}
+      {{- with .Values.node.windows.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.windows.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -40,6 +40,15 @@ policies:
         # controller-gen output: it carries the header, but always below a
         # //go:build line, which the license check reads as a preceding comment.
         - zz_generated.deepcopy.go
+        # OS-specific files in pkg/csi, same reason: the //go:build line comes
+        # first. Suffixes match file names, so pkg/utils/node's node.go and
+        # node_test.go are skipped as well.
+        - kata.go
+        - kata_test.go
+        - node.go
+        - node_test.go
+        - node_format_test.go
+        - _windows.go
       allowPrecedingComments: false
       header: |
         /*

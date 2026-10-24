@@ -14,7 +14,7 @@ on:
 jobs:
   build-publish:
     name: "Build image and publish"
-    timeout-minutes: 15
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -52,7 +52,7 @@ jobs:
         run: echo "USERNAME=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
       - name: Build and push
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: make images
         env:
           PUSH: "true"
@@ -64,7 +64,7 @@ jobs:
           TAG: "edge"
 
       - name: Build and push
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: make images
         env:
           PUSH: "true"

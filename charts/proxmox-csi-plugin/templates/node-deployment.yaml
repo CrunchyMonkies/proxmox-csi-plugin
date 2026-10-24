@@ -147,10 +147,8 @@ spec:
             path: {{ .Values.node.kataDirectVolumes.root }}
             type: DirectoryOrCreate
         {{- end }}
-      {{- with .Values.node.nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- toYaml (merge (deepCopy (.Values.node.nodeSelector | default dict)) (dict "kubernetes.io/os" "linux")) | nindent 8 }}
       {{- with .Values.node.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}

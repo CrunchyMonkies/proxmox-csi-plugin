@@ -58,6 +58,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: node
 {{- end }}
 
+{{- define "proxmox-csi-plugin-node-windows.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "proxmox-csi-plugin.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: node-windows
+{{- end }}
+
 {{- define "proxmox-csi-plugin-migrator.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "proxmox-csi-plugin.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

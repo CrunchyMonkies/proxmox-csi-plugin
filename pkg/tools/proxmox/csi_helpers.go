@@ -438,7 +438,23 @@ func DetachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 	}
 
 	if lun, ok := IsVolumeAttached(vm.VirtualMachineConfig, VolumeMatch(vol)); ok {
-		task, err := vm.UnlinkDisk(ctx, fmt.Sprintf("%s%d", DeviceNamePrefix, lun), false)
+		device := fmt.Sprintf("%s%d", DeviceNamePrefix, lun)
+
+		task, err := vm.UnlinkDisk(ctx, device, false)
+		if err != nil && isHotUnplugTimeout(err) {
+			// With scsihw virtio-scsi-single every disk has its own virtio-scsi PCI
+			// controller, unplugged after the disk. A Windows guest ignores the first
+			// eject request for that controller, so PVE gives up after 15 s with the disk
+			// already gone from the guest and its removal left pending in the config. A
+			// second unlink finds the disk unplugged and applies the pending removal. The
+			// empty controller stays in the VM until reboot and is reused when a disk is
+			// attached to the same slot again.
+			klog.InfoS("DetachVolume: guest did not release the disk controller, applying the pending removal",
+				"vmID", id, "device", device, "volumeID", vol.VolumeID(), "err", err)
+
+			task, err = vm.UnlinkDisk(ctx, device, false)
+		}
+
 		if err != nil {
 			return fmt.Errorf("failed to unlink disk: %v", err)
 		}
@@ -455,6 +471,12 @@ func DetachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 	}
 
 	return nil
+}
+
+// isHotUnplugTimeout reports whether err is PVE giving up on a device the guest had
+// not released yet (QemuServer.pm qemu_devicedelverify).
+func isHotUnplugTimeout(err error) bool {
+	return strings.Contains(err.Error(), "still busy in guest")
 }
 
 // ClearUnusedDisk removes the `unused<n>` key that detaching leaves behind for a
