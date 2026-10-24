@@ -1,3 +1,5 @@
+//go:build !windows
+
 /*
 Copyright 2023 The Kubernetes Authors.
 
@@ -56,11 +58,6 @@ import (
 )
 
 const (
-	// DefaultKataDirectVolumeRoot is where Kata looks for direct-assigned volume descriptions.
-	DefaultKataDirectVolumeRoot = "/run/kata-containers/shared/direct-volumes"
-	// DefaultKataHandlerPrefix marks RuntimeClass handlers that run pods in Kata VMs.
-	DefaultKataHandlerPrefix = "kata"
-
 	kataMountInfoFile = "mountInfo.json"
 	// kataVolumeTypeBlock is Kata runtime-rs's raw block direct volume, mounted in the guest
 	// (KATA_DIRECT_VOLUME_TYPE in runtime-rs resource/src/volume/direct_volumes/mod.rs; any other
@@ -84,16 +81,6 @@ type KataMountInfo struct {
 	FsType     string            `json:"fstype"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 	Options    []string          `json:"options,omitempty"`
-}
-
-// KataDirectVolumes configures direct-assigned volumes for Kata pods.
-type KataDirectVolumes struct {
-	// Enabled publishes filesystem volumes of Kata pods as direct-assigned volumes.
-	Enabled bool
-	// HandlerPrefix marks Kata RuntimeClass handlers.
-	HandlerPrefix string
-	// Root is Kata's direct volume directory.
-	Root string
 }
 
 // kataDirectVolumeDir is the directory Kata reads for the volume mounted at targetPath.

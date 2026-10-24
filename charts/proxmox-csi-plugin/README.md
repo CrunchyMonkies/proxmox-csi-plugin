@@ -1,6 +1,6 @@
 # proxmox-csi-plugin
 
-![Version: 0.25.0](https://img.shields.io/badge/Version-0.25.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.8.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.8.0-informational?style=flat-square)
+![Version: 0.26.0](https://img.shields.io/badge/Version-0.26.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.9.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.9.0-informational?style=flat-square)
 
 Container Storage Interface plugin for Proxmox
 
@@ -157,6 +157,14 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | node.nodeSelector | object | `{}` | Node labels for node-plugin assignment. ref: https://kubernetes.io/docs/user-guide/node-selection/ |
 | node.tolerations | list | `[{"effect":"NoSchedule","key":"karpenter.sh/disrupted","operator":"Exists"},{"effect":"NoSchedule","key":"node.kubernetes.io/unschedulable","operator":"Exists"},{"effect":"NoSchedule","key":"node.kubernetes.io/disk-pressure","operator":"Exists"}]` | Tolerations for node-plugin assignment. ref: https://kubernetes.io/docs/concepts/configuration/taint-and-toleration/ |
 | node.affinity | object | `{}` | Affinity for node-plugin assignment. ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity |
+| node.windows | object | `{"affinity":{},"enabled":false,"kubeletDir":"C:\\var\\lib\\kubelet","nodeSelector":{},"plugin":{"image":{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/proxmox-csi-node","tag":""},"resources":{}},"tolerations":[]}` | Node plugin for Windows nodes, run as a HostProcess DaemonSet (Kubernetes 1.26+). Volumes are formatted NTFS: use a StorageClass with `csi.storage.k8s.io/fstype: ntfs` (or no fstype). Raw block and encrypted volumes are not supported on Windows. The guest needs the virtio-win `vioscsi` driver. |
+| node.windows.enabled | bool | `false` | Deploy the node plugin to Windows nodes. |
+| node.windows.plugin.image | object | `{"pullPolicy":"IfNotPresent","repository":"ghcr.io/crunchymonkies/proxmox-csi-node","tag":""}` | Windows node CSI Driver. |
+| node.windows.plugin.resources | object | `{}` | Windows node CSI Driver resource requests and limits. |
+| node.windows.kubeletDir | string | `"C:\\var\\lib\\kubelet"` | Location of the kubelet directory on Windows nodes. |
+| node.windows.nodeSelector | object | `{}` | Node labels for Windows node-plugin assignment; `kubernetes.io/os: windows` is always set. |
+| node.windows.tolerations | list | `[]` | Tolerations for Windows node-plugin assignment, e.g. the taint that keeps Linux workloads off Windows nodes. |
+| node.windows.affinity | object | `{}` | Affinity for Windows node-plugin assignment. |
 | livenessprobe.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/livenessprobe","tag":"v2.16.0"}` | Common livenessprobe sidecar. |
 | livenessprobe.failureThreshold | int | `5` | Failure threshold for livenessProbe |
 | livenessprobe.initialDelaySeconds | int | `10` | Initial delay seconds for livenessProbe |

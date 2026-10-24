@@ -1,3 +1,5 @@
+//go:build !windows
+
 /*
 Copyright 2023 The Kubernetes Authors.
 
@@ -30,13 +32,10 @@ import (
 	"github.com/siderolabs/go-blockdevice/blockdevice/encryption"
 	luks "github.com/siderolabs/go-blockdevice/blockdevice/encryption/luks"
 	"github.com/siderolabs/go-blockdevice/blockdevice/filesystem"
+	"github.com/siderolabs/go-retry/retry"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	utilsnode "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/node"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/cloud-provider-openstack/pkg/util/blockdevice"
 	"k8s.io/cloud-provider-openstack/pkg/util/mount"
@@ -45,25 +44,6 @@ import (
 	"k8s.io/utils/exec"
 	"k8s.io/utils/keymutex"
 	utilpath "k8s.io/utils/path"
-)
-
-var nodeCaps = []csi.NodeServiceCapability_RPC_Type{
-	csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME,
-	csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
-	csi.NodeServiceCapability_RPC_GET_VOLUME_STATS,
-}
-
-var volumeCaps = []csi.VolumeCapability_AccessMode_Mode{
-	csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
-	csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
-	csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
-	csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
-}
-
-const (
-	// VolumesPerNodeHardLimit is the technical limitation of the number of volumes that can be attached to a single node.
-	// This is currently limited by the QEMU limit of 30 iscsi volumes, see `man qm` for details.`
-	VolumesPerNodeHardLimit = 30
 )
 
 // NodeService is the node service for the CSI driver
@@ -635,88 +615,6 @@ func (n *NodeService) NodeExpandVolume(_ context.Context, request *csi.NodeExpan
 	return &csi.NodeExpandVolumeResponse{}, nil
 }
 
-// NodeGetCapabilities get the node capabilities
-func (n *NodeService) NodeGetCapabilities(_ context.Context, _ *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
-	klog.V(4).InfoS("NodeGetCapabilities: called")
-
-	caps := make([]*csi.NodeServiceCapability, 0, len(nodeCaps))
-
-	for _, cap := range nodeCaps {
-		c := &csi.NodeServiceCapability{
-			Type: &csi.NodeServiceCapability_Rpc{
-				Rpc: &csi.NodeServiceCapability_RPC{
-					Type: cap,
-				},
-			},
-		}
-		caps = append(caps, c)
-	}
-
-	return &csi.NodeGetCapabilitiesResponse{Capabilities: caps}, nil
-}
-
-// NodeGetInfo get the node info
-func (n *NodeService) NodeGetInfo(ctx context.Context, _ *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
-	klog.V(4).InfoS("NodeGetInfo: called")
-
-	nodeID, err := utilsnode.ParseNodeID(n.nodeID)
-	if err != nil {
-		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("failed to parse nodeID %s: %v", n.nodeID, err))
-	}
-
-	if _, err = nodeID.GetVMID(); err != nil {
-		nodeIDSMBIOS, err := utilsnode.GetNodeID(nodeID.GetNodeName())
-		if err != nil {
-			klog.ErrorS(err, "NodeGetInfo: failed to get nodeID from SMBIOS, continuing with original nodeID", "nodeName", nodeID.GetNodeName())
-		}
-
-		nodeID = nodeIDSMBIOS
-	}
-
-	node, err := n.kclient.CoreV1().Nodes().Get(ctx, nodeID.GetNodeName(), metav1.GetOptions{})
-	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to get node %s: %v", n.nodeID, err))
-	}
-
-	region, zone := GetNodeTopology(node.Labels)
-	if region == "" || zone == "" {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to get region or zone for node %s", n.nodeID))
-	}
-
-	return &csi.NodeGetInfoResponse{
-		NodeId:            nodeID.String(),
-		MaxVolumesPerNode: maxVolumes(node),
-		AccessibleTopology: &csi.Topology{
-			Segments: map[string]string{
-				corev1.LabelTopologyRegion: region,
-				corev1.LabelTopologyZone:   zone,
-			},
-		},
-	}, nil
-}
-
-func isValidVolumeCapabilities(volCaps []*csi.VolumeCapability) bool {
-	hasSupport := func(reqcap *csi.VolumeCapability) bool {
-		for _, c := range volumeCaps {
-			if c == reqcap.GetAccessMode().GetMode() {
-				return true
-			}
-		}
-
-		return false
-	}
-
-	foundAll := true
-
-	for _, c := range volCaps {
-		if !hasSupport(c) {
-			foundAll = false
-		}
-	}
-
-	return foundAll
-}
-
 func collectMountOptions(params StorageParameters, fsType string, mntFlags []string) []string {
 	options := []string{}
 	options = append(options, mntFlags...)
@@ -807,22 +705,89 @@ func collectFormatOptions(params StorageParameters, fsType string) []string {
 	return formatOptions
 }
 
-func maxVolumes(node *corev1.Node) int64 {
-	volumes, err := strconv.ParseInt(node.Labels[NodeLabelMaxVolumeAttachments], 10, 64)
+func getDevicePath(deviceContext map[string]string) (string, error) {
+	sysPath := "/sys/bus/scsi/devices"
+
+	devicePath := deviceContext["DevicePath"]
+	if len(devicePath) == 0 {
+		return "", fmt.Errorf("DevicePath must be provided")
+	}
+
+	deviceWWN := ""
+	if strings.HasPrefix(devicePath, "/dev/disk/by-id/wwn-0x") {
+		deviceWWN = devicePath[len("/dev/disk/by-id/wwn-0x"):]
+	}
+
+	if deviceWWN != "" {
+		if dirs, err := os.ReadDir(sysPath); err == nil {
+			for _, f := range dirs {
+				device := f.Name()
+
+				// /sys/bus/scsi/devices/0:0:0:0
+				arr := strings.Split(device, ":")
+				if len(arr) < 4 {
+					continue
+				}
+
+				_, err := strconv.Atoi(arr[3])
+				if err != nil {
+					continue
+				}
+
+				vendorBytes, err := os.ReadFile(filepath.Join(sysPath, device, "vendor"))
+				if err != nil {
+					continue
+				}
+
+				vendor := strings.TrimSpace(string(vendorBytes))
+				if strings.ToUpper(vendor) != "QEMU" {
+					continue
+				}
+
+				wwidBytes, err := os.ReadFile(filepath.Join(sysPath, device, "wwid"))
+				if err != nil {
+					continue
+				}
+
+				wwid := strings.TrimSpace(string(wwidBytes))
+				if !strings.HasPrefix(wwid, "naa.") {
+					continue
+				}
+
+				wwn := wwid[len("naa."):]
+				if wwn == deviceWWN {
+					if dev, err := os.ReadDir(filepath.Join(sysPath, device, "block")); err == nil {
+						if len(dev) > 0 {
+							devName := dev[0].Name()
+
+							return fmt.Sprintf("/dev/%s", devName), nil
+						}
+
+						return "", fmt.Errorf("no block device found")
+					}
+				}
+			}
+		}
+	}
+
+	err := retry.Constant(10*time.Second, retry.WithUnits(50*time.Millisecond)).Retry(func() error {
+		if _, err := os.Stat(devicePath); err != nil {
+			if os.IsNotExist(err) {
+				return retry.ExpectedError(err)
+			}
+
+			return err
+		}
+
+		return nil
+	})
 	if err != nil {
-		volumes = DefaultMaxVolumesPerNode
+		if retry.IsTimeout(err) {
+			return "", fmt.Errorf("device %s is not found", devicePath)
+		}
+
+		return "", err
 	}
 
-	if volumes < 0 || volumes > VolumesPerNodeHardLimit {
-		klog.V(3).InfoS("Node has out of range value for max volume attachments, using default",
-			"node", node.Name,
-			"label", NodeLabelMaxVolumeAttachments,
-			"value", volumes,
-			"hardLimit", VolumesPerNodeHardLimit,
-			"default", DefaultMaxVolumesPerNode)
-
-		return DefaultMaxVolumesPerNode
-	}
-
-	return volumes
+	return devicePath, nil
 }

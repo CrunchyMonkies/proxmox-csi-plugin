@@ -22,13 +22,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	proto "github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/siderolabs/go-retry/retry"
 
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/provider"
 
@@ -99,7 +98,12 @@ func ParseEndpoint(endpoint string) (string, string, error) {
 	switch scheme {
 	case "tcp":
 	case "unix":
-		addr = path.Join("/", addr)
+		if runtime.GOOS == "windows" {
+			addr = windowsSocketPath(u)
+		} else {
+			addr = path.Join("/", addr)
+		}
+
 		if err := os.Remove(addr); err != nil && !os.IsNotExist(err) {
 			return "", "", fmt.Errorf("could not remove unix domain socket %q: %v", addr, err)
 		}
@@ -108,6 +112,23 @@ func ParseEndpoint(endpoint string) (string, string, error) {
 	}
 
 	return scheme, addr, nil
+}
+
+// windowsSocketPath turns a unix:// endpoint into a Windows file path. The drive letter
+// lands in the opaque part for unix:C:/dir/csi.sock (the form gRPC clients such as the
+// CSI sidecars accept), in the host for unix://C:/dir/csi.sock and at the start of the
+// path for unix:///C:/dir/csi.sock; all three mean C:\dir\csi.sock.
+func windowsSocketPath(u *url.URL) string {
+	p := u.Opaque
+	if p == "" {
+		p = u.Host + u.Path
+	}
+
+	if len(p) > 2 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+
+	return strings.ReplaceAll(p, "/", `\`)
 }
 
 // ProxmoxVMIDbyNode returns the Proxmox VM ID from the specified kubernetes node.
@@ -178,93 +199,6 @@ func locationFromTopologyRequirement(tr *proto.TopologyRequirement) (region, zon
 	}
 
 	return region, ""
-}
-
-func getDevicePath(deviceContext map[string]string) (string, error) {
-	sysPath := "/sys/bus/scsi/devices"
-
-	devicePath := deviceContext["DevicePath"]
-	if len(devicePath) == 0 {
-		return "", fmt.Errorf("DevicePath must be provided")
-	}
-
-	deviceWWN := ""
-	if strings.HasPrefix(devicePath, "/dev/disk/by-id/wwn-0x") {
-		deviceWWN = devicePath[len("/dev/disk/by-id/wwn-0x"):]
-	}
-
-	if deviceWWN != "" {
-		if dirs, err := os.ReadDir(sysPath); err == nil {
-			for _, f := range dirs {
-				device := f.Name()
-
-				// /sys/bus/scsi/devices/0:0:0:0
-				arr := strings.Split(device, ":")
-				if len(arr) < 4 {
-					continue
-				}
-
-				_, err := strconv.Atoi(arr[3])
-				if err != nil {
-					continue
-				}
-
-				vendorBytes, err := os.ReadFile(filepath.Join(sysPath, device, "vendor"))
-				if err != nil {
-					continue
-				}
-
-				vendor := strings.TrimSpace(string(vendorBytes))
-				if strings.ToUpper(vendor) != "QEMU" {
-					continue
-				}
-
-				wwidBytes, err := os.ReadFile(filepath.Join(sysPath, device, "wwid"))
-				if err != nil {
-					continue
-				}
-
-				wwid := strings.TrimSpace(string(wwidBytes))
-				if !strings.HasPrefix(wwid, "naa.") {
-					continue
-				}
-
-				wwn := wwid[len("naa."):]
-				if wwn == deviceWWN {
-					if dev, err := os.ReadDir(filepath.Join(sysPath, device, "block")); err == nil {
-						if len(dev) > 0 {
-							devName := dev[0].Name()
-
-							return fmt.Sprintf("/dev/%s", devName), nil
-						}
-
-						return "", fmt.Errorf("no block device found")
-					}
-				}
-			}
-		}
-	}
-
-	err := retry.Constant(10*time.Second, retry.WithUnits(50*time.Millisecond)).Retry(func() error {
-		if _, err := os.Stat(devicePath); err != nil {
-			if os.IsNotExist(err) {
-				return retry.ExpectedError(err)
-			}
-
-			return err
-		}
-
-		return nil
-	})
-	if err != nil {
-		if retry.IsTimeout(err) {
-			return "", fmt.Errorf("device %s is not found", devicePath)
-		}
-
-		return "", err
-	}
-
-	return devicePath, nil
 }
 
 // RoundUpSizeBytes calculates how many allocation units are needed to accommodate

@@ -22,6 +22,7 @@ import (
 	"flag"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	proto "github.com/container-storage-interface/spec/lib/go/csi"
@@ -135,6 +136,13 @@ func main() {
 	scheme, addr, err := csi.ParseEndpoint(*csiEndpoint)
 	if err != nil {
 		klog.Fatalf("Failed to parse endpoint: %v", err)
+	}
+
+	// A Windows HostProcess pod has no hostPath volume to create the socket directory.
+	if scheme == "unix" {
+		if err = os.MkdirAll(filepath.Dir(addr), 0o750); err != nil {
+			klog.Fatalf("Failed to create socket directory for %s: %v", addr, err)
+		}
 	}
 
 	listener, err := net.Listen(scheme, addr)

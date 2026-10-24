@@ -21,6 +21,17 @@ else
 BUILD_ARGS += --output type=docker
 endif
 
+# The Windows node image is published as <tag>-windows in the proxmox-csi-node
+# repository. A Windows image cannot be loaded into a Linux docker, so a build
+# without PUSH only checks that it builds.
+WINDOWS_BUILD_ARGS := --platform=windows/amd64
+ifeq ($(PUSH),true)
+WINDOWS_BUILD_ARGS += --push=$(PUSH)
+WINDOWS_BUILD_ARGS += --output type=image,annotation-index.org.opencontainers.image.source="https://github.com/$(USERNAME)/proxmox-csi-plugin",annotation-index.org.opencontainers.image.description="Proxmox VE CSI plugin for Windows nodes"
+else
+WINDOWS_BUILD_ARGS += --output type=cacheonly
+endif
+
 COSING_ARGS ?=
 
 ############
@@ -68,6 +79,10 @@ build-pvecsictl:
 build-volume-operator:
 	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build $(GO_LDFLAGS) \
 		-o bin/proxmox-csi-operator-$(ARCH) ./cmd/volume-operator
+
+build-node-windows: ## Build the Windows node plugin
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GO_LDFLAGS) \
+		-o bin/proxmox-csi-node-windows-amd64.exe ./cmd/node
 
 build-%:
 	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build $(GO_LDFLAGS) \
@@ -204,6 +219,14 @@ docker-init:
 	docker context use multiarch
 	docker buildx inspect --bootstrap multiarch
 
+image-proxmox-csi-node-windows:
+	docker buildx build $(WINDOWS_BUILD_ARGS) \
+		--build-arg TAG=$(TAG) \
+		--build-arg SHA=$(SHA) \
+		-t $(OCIREPO)/proxmox-csi-node:$(TAG)-windows \
+		--target proxmox-csi-node-windows \
+		-f Dockerfile .
+
 image-%:
 	docker buildx build $(BUILD_ARGS) \
 		--build-arg TAG=$(TAG) \
@@ -223,8 +246,9 @@ images-checks: images image-tools-check
 images-cosign:
 	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/proxmox-csi-controller:$(TAG)
 	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/proxmox-csi-node:$(TAG)
+	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/proxmox-csi-node:$(TAG)-windows
 	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/pvecsictl:$(TAG)
 	@cosign sign --yes $(COSING_ARGS) --recursive $(OCIREPO)/proxmox-csi-operator:$(TAG)
 
 .PHONY: images
-images: image-proxmox-csi-controller image-proxmox-csi-node image-pvecsictl image-proxmox-csi-operator ## Build images
+images: image-proxmox-csi-controller image-proxmox-csi-node image-proxmox-csi-node-windows image-pvecsictl image-proxmox-csi-operator ## Build images

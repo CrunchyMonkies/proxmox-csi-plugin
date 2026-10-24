@@ -18,6 +18,7 @@ package proxmoxpool_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jarcoal/httpmock"
@@ -27,11 +28,14 @@ import (
 
 	goproxmox "github.com/sergelogvinov/go-proxmox"
 	pxpool "github.com/sergelogvinov/proxmox-csi-plugin/pkg/proxmoxpool"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	vmUUID100 = "11111111-1111-1111-1111-111111111111"
-	vmUUID101 = "22222222-2222-2222-2222-222222222222"
+	vmUUID101 = "2222222a-2222-2222-2222-22222222222b"
 )
 
 // mockVMCluster registers a two-VM cluster and returns the pool addressing it.
@@ -135,4 +139,24 @@ func TestFindVMByUUIDRequestCount(t *testing.T) {
 	assert.Equal(t, 1, counts["GET =~/nodes/pve-1/qemu/100/config$"])
 	assert.Equal(t, 1, counts["GET =~/nodes/pve-2/qemu/101/config$"])
 	assert.Equal(t, 3, httpmock.GetTotalCallCount())
+}
+
+// Windows reports the SMBIOS UUID upper-cased (4465830F-F1AF-…) while Proxmox stores
+// it as written in smbios1, lower-cased; a Windows node must still resolve to its VM.
+func TestFindVMByNodeUUIDCase(t *testing.T) {
+	pool := mockVMCluster(t)
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-2"},
+		Status:     corev1.NodeStatus{NodeInfo: corev1.NodeSystemInfo{SystemUUID: strings.ToUpper(vmUUID101)}},
+	}
+
+	vmID, region, err := pool.FindVMByNode(context.Background(), node)
+	require.NoError(t, err)
+	assert.Equal(t, 101, vmID)
+	assert.Equal(t, "cluster-1", region)
+
+	vmID, _, err = pool.FindVMByUUID(context.Background(), strings.ToUpper(vmUUID101))
+	require.NoError(t, err)
+	assert.Equal(t, 101, vmID)
 }

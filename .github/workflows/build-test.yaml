@@ -35,12 +35,25 @@ jobs:
         with:
           version: v2.12.2
           args: --timeout=5m --config=.golangci.yml
+      - name: Lint (windows)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: windows
+        with:
+          version: v2.12.2
+          args: --timeout=5m --config=.golangci.yml ./pkg/csi/... ./cmd/node/...
+      - name: Vet (windows)
+        run: go vet ./pkg/... ./cmd/...
+        env:
+          GOOS: windows
       - name: Unit
         run: make unit
       - name: Generated code
         run: make generate-check
       - name: Operator isolation
         run: make operator-isolation
+      - name: Set up docker buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Build
         timeout-minutes: 10
         run: make images

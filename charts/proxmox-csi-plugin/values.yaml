@@ -311,6 +311,32 @@ node:
   # ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity
   affinity: {}
 
+  # -- Node plugin for Windows nodes, run as a HostProcess DaemonSet (Kubernetes 1.26+).
+  # Volumes are formatted NTFS: use a StorageClass with `csi.storage.k8s.io/fstype: ntfs`
+  # (or no fstype). Raw block and encrypted volumes are not supported on Windows.
+  # The guest needs the virtio-win `vioscsi` driver.
+  windows:
+    # -- Deploy the node plugin to Windows nodes.
+    enabled: false
+    plugin:
+      # -- Windows node CSI Driver.
+      image:
+        repository: ghcr.io/crunchymonkies/proxmox-csi-node
+        pullPolicy: IfNotPresent
+        # Overrides the image tag whose default is the chart appVersion with a `-windows` suffix.
+        tag: ""
+      # -- Windows node CSI Driver resource requests and limits.
+      resources: {}
+    # -- Location of the kubelet directory on Windows nodes.
+    kubeletDir: 'C:\var\lib\kubelet'
+    # -- Node labels for Windows node-plugin assignment; `kubernetes.io/os: windows` is always set.
+    nodeSelector: {}
+    # -- Tolerations for Windows node-plugin assignment, e.g. the taint that keeps Linux
+    # workloads off Windows nodes.
+    tolerations: []
+    # -- Affinity for Windows node-plugin assignment.
+    affinity: {}
+
 livenessprobe:
   # -- Common livenessprobe sidecar.
   image:

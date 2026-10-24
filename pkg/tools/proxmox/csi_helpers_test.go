@@ -173,3 +173,84 @@ func TestCopyTaskTimeout(t *testing.T) {
 
 	assert.Equal(t, 240*15, CopyTaskTimeout)
 }
+
+// TestDetachVolumeHotUnplugTimeout replays what PVE does when a Windows guest is slow to
+// release the virtio-scsi controller of a disk: the first unlink fails with "still busy
+// in guest?" and leaves the removal pending, the second applies it.
+func TestDetachVolumeHotUnplugTimeout(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		firstError string
+		wantErr    bool
+		wantCalls  int
+	}{
+		{
+			name:       "controller still busy",
+			firstError: `{"errors":{"scsi5":"hotplug problem - error on hot-unplugging device 'virtioscsi5' - still busy in guest?\n"},"data":null}`,
+			wantCalls:  2,
+		},
+		{
+			name:       "other failure is not retried",
+			firstError: `{"errors":{"scsi5":"can't unplug bootdisk 'scsi5'\n"},"data":null}`,
+			wantErr:    true,
+			wantCalls:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			unlinks := 0
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/api2/json/cluster/resources", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":100,"node":"pve-1","name":"win-1","status":"running"}]}`)
+			})
+			mux.HandleFunc("/api2/json/nodes/pve-1/qemu/100/status/current", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"data":{"vmid":100,"status":"running"}}`)
+			})
+			mux.HandleFunc("/api2/json/nodes/pve-1/qemu/100/config", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, `{"data":{"scsi0":"local:100/vm-100-disk-0.qcow2,size=100G","scsi5":"local:vm-9999-pvc-123,size=1G,wwn=0x5056432d49443035"}}`)
+			})
+			mux.HandleFunc("/api2/json/nodes/pve-1/qemu/100/unlink", func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodPut, r.Method)
+
+				unlinks++
+
+				w.Header().Set("Content-Type", "application/json")
+
+				if unlinks == 1 {
+					w.WriteHeader(http.StatusBadRequest)
+					fmt.Fprint(w, tt.firstError)
+
+					return
+				}
+
+				fmt.Fprint(w, `{"data":null}`)
+			})
+
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			cl, err := goproxmox.NewAPIClient(srv.URL + "/api2/json")
+			require.NoError(t, err)
+
+			vol := volume.NewVolume("cluster-1", "pve-1", "local", "vm-9999-pvc-123")
+
+			err = DetachVolume(context.Background(), cl, 100, vol)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			assert.Equal(t, tt.wantCalls, unlinks)
+		})
+	}
+}
