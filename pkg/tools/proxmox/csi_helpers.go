@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,6 +41,29 @@ import (
 const (
 	// DeviceNamePrefix is the disk device prefix used by the CSI driver.
 	DeviceNamePrefix = "scsi"
+	// VirtIODeviceNamePrefix is the device prefix of the virtio-blk slots the CSI
+	// driver falls back to once every SCSI slot is taken.
+	VirtIODeviceNamePrefix = "virtio"
+
+	// MaxSCSIDisks is the per-VM SCSI slot count PVE allows, scsi0-scsi30
+	// (qemu-server PVE/QemuServer/Drive.pm). SATA and IDE are not used: PVE
+	// cannot hotplug them.
+	MaxSCSIDisks = 31
+	// MaxVirtIODisks is the per-VM virtio-blk slot count PVE allows, virtio0-virtio15.
+	MaxVirtIODisks = 16
+
+	// VirtIOLunOffset is the first lun naming a virtio slot: lun N < VirtIOLunOffset
+	// is scsiN, lun N >= VirtIOLunOffset is virtio(N-VirtIOLunOffset). Keeping the
+	// slot a single integer leaves the publish context, the attachment status and
+	// the volume API unchanged, and every lun published before stays a SCSI lun.
+	VirtIOLunOffset = MaxSCSIDisks
+	// MaxLun is one past the highest lun.
+	MaxLun = VirtIOLunOffset + MaxVirtIODisks
+
+	// DevicePathWWNPrefix is the by-id path of a SCSI disk, named for the WWN set on it.
+	DevicePathWWNPrefix = "/dev/disk/by-id/wwn-0x"
+	// DevicePathVirtIOPrefix is the by-id path of a virtio-blk disk, named for its serial.
+	DevicePathVirtIOPrefix = "/dev/disk/by-id/virtio-"
 
 	// TaskStatusCheckInterval is the interval in seconds to check the status of a task.
 	TaskStatusCheckInterval = 5
@@ -311,26 +335,105 @@ func ResolveVolume(ctx context.Context, cl *goproxmox.APIClient, vol *volume.Vol
 	return found, size, nil
 }
 
+// DeviceName returns the VM config key of the slot lun names (see VirtIOLunOffset).
+func DeviceName(lun int) string {
+	if lun >= VirtIOLunOffset {
+		return VirtIODeviceNamePrefix + strconv.Itoa(lun-VirtIOLunOffset)
+	}
+
+	return DeviceNamePrefix + strconv.Itoa(lun)
+}
+
+// DeviceLun returns the lun of a VM config key, the inverse of DeviceName.
+func DeviceLun(device string) (int, bool) {
+	prefix, offset, limit := DeviceNamePrefix, 0, MaxSCSIDisks
+	if strings.HasPrefix(device, VirtIODeviceNamePrefix) {
+		prefix, offset, limit = VirtIODeviceNamePrefix, VirtIOLunOffset, MaxVirtIODisks
+	}
+
+	idx, err := strconv.Atoi(strings.TrimPrefix(device, prefix))
+	if err != nil || idx < 0 || idx >= limit || !strings.HasPrefix(device, prefix) {
+		return 0, false
+	}
+
+	return offset + idx, true
+}
+
+// deviceSerial is the identifier the driver gives the disk at lun: the SCSI WWN
+// (hex-encoded) or, for a virtio slot, the serial itself. Both stay unique per VM.
+func deviceSerial(lun int) string {
+	return fmt.Sprintf("PVC-ID%02d", lun)
+}
+
+// DevicePath returns the by-id path the guest sees for the disk at lun.
+func DevicePath(lun int) string {
+	if lun >= VirtIOLunOffset {
+		return DevicePathVirtIOPrefix + deviceSerial(lun)
+	}
+
+	return DevicePathWWNPrefix + hex.EncodeToString([]byte(deviceSerial(lun)))
+}
+
+// attachedDisks returns the SCSI and virtio slots of vm, keyed by config key.
+func attachedDisks(vm *proxmox.VirtualMachineConfig) map[string]string {
+	disks := make(map[string]string)
+	maps.Copy(disks, vm.MergeSCSIs())
+	maps.Copy(disks, vm.MergeVirtIOs())
+
+	return disks
+}
+
 // IsVolumeAttached checks whether a volume is attached to a VM by scanning its
-// SCSI configuration.
+// SCSI and virtio configuration.
 func IsVolumeAttached(vm *proxmox.VirtualMachineConfig, pvc string) (int, bool) {
 	if pvc == "" {
 		return 0, false
 	}
 
-	disks := vm.MergeSCSIs()
-	for lun, disk := range disks {
+	for device, disk := range attachedDisks(vm) {
 		if strings.Contains(disk, pvc) {
-			i, err := strconv.Atoi(strings.TrimPrefix(strings.Split(lun, ":")[0], DeviceNamePrefix))
-			if err != nil {
-				return 0, false
-			}
-
-			return i, true
+			return DeviceLun(device)
 		}
 	}
 
 	return 0, false
+}
+
+// freeLun returns the first free slot of vm: SCSI first, scsi0 excluded as the
+// conventional boot disk, then virtio-blk once every SCSI slot is taken.
+func freeLun(vm *proxmox.VirtualMachineConfig) (int, bool) {
+	disks := attachedDisks(vm)
+
+	for lun := 1; lun < MaxLun; lun++ {
+		if disks[DeviceName(lun)] == "" {
+			return lun, true
+		}
+	}
+
+	return 0, false
+}
+
+// deviceOptions returns the disk options for the slot at lun, tagged with the
+// identifier the node finds the disk by. virtio-blk has neither wwn nor ssd (PVE
+// rejects them), so a virtio disk carries a serial instead.
+func deviceOptions(lun int, options map[string]string) map[string]string {
+	opts := maps.Clone(options)
+	if opts == nil {
+		opts = make(map[string]string)
+	}
+
+	if lun >= VirtIOLunOffset {
+		delete(opts, "wwn")
+		delete(opts, "ssd")
+
+		opts["serial"] = deviceSerial(lun)
+
+		return opts
+	}
+
+	opts["wwn"] = "0x" + hex.EncodeToString([]byte(deviceSerial(lun)))
+
+	return opts
 }
 
 // CreateVolume creates a new VM disk on Proxmox storage.
@@ -366,64 +469,49 @@ func AttachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 		return nil, fmt.Errorf("failed to get vm config: %v", err)
 	}
 
-	wwm := ""
-
 	lun, exist := IsVolumeAttached(vm.VirtualMachineConfig, VolumeMatch(vol))
-	if exist {
-		wwm = hex.EncodeToString([]byte(fmt.Sprintf("PVC-ID%02d", lun)))
-	} else {
-		disks := vm.VirtualMachineConfig.MergeSCSIs()
+	if !exist {
+		lun, exist = freeLun(vm.VirtualMachineConfig)
+		if !exist {
+			return nil, fmt.Errorf("no free lun found")
+		}
 
-		for lun = 1; lun < 30; lun++ {
-			device := DeviceNamePrefix + strconv.Itoa(lun)
+		opts := deviceOptions(lun, options)
 
-			if disks[device] == "" {
-				wwm = hex.EncodeToString([]byte(fmt.Sprintf("PVC-ID%02d", lun)))
+		opt := make([]string, 0, len(opts))
+		for k := range opts {
+			opt = append(opt, fmt.Sprintf("%s=%s", k, opts[k]))
+		}
 
-				options["wwn"] = "0x" + wwm
+		vmOptions := proxmox.VirtualMachineOption{
+			Name:  DeviceName(lun),
+			Value: fmt.Sprintf("%s:%s,%s", vol.Storage(), vol.Disk(), strings.Join(opt, ",")),
+		}
 
-				opt := make([]string, 0, len(options))
-				for k := range options {
-					opt = append(opt, fmt.Sprintf("%s=%s", k, options[k]))
-				}
+		task, err := vm.Config(ctx, vmOptions)
+		if err != nil {
+			return nil, fmt.Errorf("unable to attach disk: %v, options=%+v", err, vmOptions)
+		}
 
-				vmOptions := proxmox.VirtualMachineOption{
-					Name:  device,
-					Value: fmt.Sprintf("%s:%s,%s", vol.Storage(), vol.Disk(), strings.Join(opt, ",")),
-				}
-
-				task, err := vm.Config(ctx, vmOptions)
-				if err != nil {
-					return nil, fmt.Errorf("unable to attach disk: %v, options=%+v", err, vmOptions)
-				}
-
-				if task != nil {
-					if err := task.WaitFor(ctx, 5*60); err != nil {
-						return nil, fmt.Errorf("unable to attach virtual machine disk: %w", err)
-					}
-
-					if task.IsFailed {
-						return nil, fmt.Errorf("unable to attach virtual machine disk: %s", task.ExitStatus)
-					}
-				}
-
-				if err := WaitAttachVolume(ctx, cl, id, vol); err != nil {
-					return nil, err
-				}
-
-				break
+		if task != nil {
+			if err := task.WaitFor(ctx, 5*60); err != nil {
+				return nil, fmt.Errorf("unable to attach virtual machine disk: %w", err)
 			}
+
+			if task.IsFailed {
+				return nil, fmt.Errorf("unable to attach virtual machine disk: %s", task.ExitStatus)
+			}
+		}
+
+		if err := WaitAttachVolume(ctx, cl, id, vol); err != nil {
+			return nil, err
 		}
 	}
 
-	if wwm != "" {
-		return map[string]string{
-			"DevicePath": "/dev/disk/by-id/wwn-0x" + wwm,
-			"lun":        strconv.Itoa(lun),
-		}, nil
-	}
-
-	return nil, fmt.Errorf("no free lun found")
+	return map[string]string{
+		"DevicePath": DevicePath(lun),
+		"lun":        strconv.Itoa(lun),
+	}, nil
 }
 
 // DetachVolume detaches a volume from a VM.
@@ -438,7 +526,7 @@ func DetachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 	}
 
 	if lun, ok := IsVolumeAttached(vm.VirtualMachineConfig, VolumeMatch(vol)); ok {
-		device := fmt.Sprintf("%s%d", DeviceNamePrefix, lun)
+		device := DeviceName(lun)
 
 		task, err := vm.UnlinkDisk(ctx, device, false)
 		if err != nil && isHotUnplugTimeout(err) {
@@ -554,8 +642,7 @@ func UpdateVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 		// rebuilding would rewrite the config back to a name that does not exist.
 		volid := fmt.Sprintf("%s:%s", vol.Storage(), vol.Disk())
 
-		disks := vm.VirtualMachineConfig.MergeSCSIs()
-		if disk := disks[DeviceNamePrefix+strconv.Itoa(lun)]; disk != "" {
+		if disk := attachedDisks(vm.VirtualMachineConfig)[DeviceName(lun)]; disk != "" {
 			params := strings.Split(disk, ",")
 			for i, param := range params {
 				if i == 0 {
@@ -571,13 +658,17 @@ func UpdateVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 			}
 		}
 
+		if lun >= VirtIOLunOffset {
+			options = deviceOptions(lun, options)
+		}
+
 		opt := make([]string, 0, len(options))
 		for k := range options {
 			opt = append(opt, fmt.Sprintf("%s=%s", k, options[k]))
 		}
 
 		vmOptions := proxmox.VirtualMachineOption{
-			Name:  DeviceNamePrefix + strconv.Itoa(lun),
+			Name:  DeviceName(lun),
 			Value: fmt.Sprintf("%s,%s", volid, strings.Join(opt, ",")),
 		}
 

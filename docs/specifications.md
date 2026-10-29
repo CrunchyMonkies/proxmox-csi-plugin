@@ -190,13 +190,13 @@ Advertised controller capabilities (`controllerCaps`):
 | `SINGLE_NODE_MULTI_WRITER` | access-mode support |
 | `MODIFY_VOLUME` | `ControllerModifyVolume` (VolumeAttributesClass) |
 
-Volume attachment: disks are hot-plugged into the target VM as SCSI devices (`deviceNamePrefix = "scsi"`), requiring the VirtIO SCSI controller on the VM.
+Volume attachment: disks are hot-plugged into the target VM as SCSI devices (`scsi1`–`scsi30`), requiring the VirtIO SCSI controller on the VM. Once every SCSI slot is taken, further disks are hot-plugged as virtio-blk devices (`virtio0`–`virtio15`) tagged with a `serial` instead of a WWN (see [volume-limits.md](volume-limits.md)).
 
 ### 4.3 Node service (`pkg/csi/node.go`)
 
 Advertised node capabilities (`nodeCaps`):
 
-- `STAGE_UNSTAGE_VOLUME` — `NodeStageVolume` locates the attached device by SCSI WWN, optionally opens a LUKS2 mapping (§7.2), formats (ext4 default, or xfs), and mounts to the staging path; `NodeUnstageVolume` reverses this
+- `STAGE_UNSTAGE_VOLUME` — `NodeStageVolume` locates the attached device by SCSI WWN (or, for a virtio-blk disk, by its serial in `/sys/block/vd*/serial`), optionally opens a LUKS2 mapping (§7.2), formats (ext4 default, or xfs), and mounts to the staging path; `NodeUnstageVolume` reverses this
 - `EXPAND_VOLUME` — `NodeExpandVolume` grows the filesystem after a controller-side resize
 - `GET_VOLUME_STATS` — `NodeGetVolumeStats` reports bytes/inodes used/available
 
@@ -412,7 +412,7 @@ Default namespace: `csi-proxmox`, priority class `system-cluster-critical`.
 | Limit / behavior | Value | Source |
 |---|---|---|
 | Default max volumes per node | 24 | `pkg/csi/driver.go` (`DefaultMaxVolumesPerNode`) |
-| Hard max volumes per node | 30 (QEMU SCSI device limit) | `pkg/csi/node.go` (`VolumesPerNodeHardLimit`) |
+| Hard max volumes per node | 46 on Linux (30 SCSI + 16 virtio-blk slots), 30 on Windows | `pkg/csi/node_common.go` (`VolumesPerNodeHardLimit`) |
 | Default volume size | 10 GiB | `pkg/csi/driver.go` |
 | Minimum allocation chunk | 512 MiB | `pkg/csi/driver.go` |
 | Storage capacity cache TTL | 1 minute | `pkg/csi/controller.go` (`cache.New(time.Minute, …)`) |

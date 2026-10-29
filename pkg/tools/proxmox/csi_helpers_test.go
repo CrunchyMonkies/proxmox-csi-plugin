@@ -18,9 +18,14 @@ package proxmox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 
 	proxmox "github.com/luthermonson/go-proxmox"
@@ -253,4 +258,219 @@ func TestDetachVolumeHotUnplugTimeout(t *testing.T) {
 			assert.Equal(t, tt.wantCalls, unlinks)
 		})
 	}
+}
+
+func TestDeviceNameLun(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		lun    int
+		device string
+	}{
+		{lun: 0, device: "scsi0"},
+		{lun: 1, device: "scsi1"},
+		{lun: 30, device: "scsi30"},
+		{lun: 31, device: "virtio0"},
+		{lun: 46, device: "virtio15"},
+	}
+
+	for _, tt := range tests {
+		assert.Equal(t, tt.device, DeviceName(tt.lun))
+
+		lun, ok := DeviceLun(tt.device)
+		assert.True(t, ok, tt.device)
+		assert.Equal(t, tt.lun, lun, tt.device)
+	}
+
+	for _, device := range []string{"scsi31", "virtio16", "sata0", "ide2", "scsi", "virtio-1", "efidisk0"} {
+		_, ok := DeviceLun(device)
+		assert.False(t, ok, device)
+	}
+}
+
+func TestDevicePath(t *testing.T) {
+	t.Parallel()
+
+	// SCSI paths are unchanged: "PVC-ID05" hex-encoded as the disk's WWN.
+	assert.Equal(t, "/dev/disk/by-id/wwn-0x5056432d49443035", DevicePath(5))
+	assert.Equal(t, "/dev/disk/by-id/wwn-0x5056432d49443330", DevicePath(30))
+	assert.Equal(t, "/dev/disk/by-id/virtio-PVC-ID31", DevicePath(31))
+	assert.Equal(t, "/dev/disk/by-id/virtio-PVC-ID46", DevicePath(46))
+}
+
+func TestIsVolumeAttachedVirtIO(t *testing.T) {
+	t.Parallel()
+
+	vm := &proxmox.VirtualMachineConfig{
+		SCSI0:   "local-lvm:vm-100-disk-0,size=8G",
+		VirtIO3: "local-lvm:vm-9999-pvc-123,serial=PVC-ID34",
+	}
+
+	lun, ok := IsVolumeAttached(vm, "pvc-123")
+	assert.True(t, ok)
+	assert.Equal(t, 34, lun)
+}
+
+// fullSCSIConfig returns a VM config map with every SCSI slot taken.
+func fullSCSIConfig() map[string]string {
+	config := map[string]string{}
+	for i := range MaxSCSIDisks {
+		config[fmt.Sprintf("scsi%d", i)] = fmt.Sprintf("local-lvm:vm-100-disk-%d,size=1G", i)
+	}
+
+	return config
+}
+
+func vmConfigFrom(t *testing.T, config map[string]string) *proxmox.VirtualMachineConfig {
+	t.Helper()
+
+	b, err := json.Marshal(config)
+	require.NoError(t, err)
+
+	vm := &proxmox.VirtualMachineConfig{}
+	require.NoError(t, json.Unmarshal(b, vm))
+
+	return vm
+}
+
+func TestFreeLun(t *testing.T) {
+	t.Parallel()
+
+	t.Run("boot disk only", func(t *testing.T) {
+		t.Parallel()
+
+		lun, ok := freeLun(vmConfigFrom(t, map[string]string{"scsi0": "local-lvm:vm-100-disk-0"}))
+		assert.True(t, ok)
+		assert.Equal(t, 1, lun)
+	})
+
+	t.Run("scsi30 is used", func(t *testing.T) {
+		t.Parallel()
+
+		config := fullSCSIConfig()
+		delete(config, "scsi30")
+
+		lun, ok := freeLun(vmConfigFrom(t, config))
+		assert.True(t, ok)
+		assert.Equal(t, 30, lun)
+	})
+
+	t.Run("falls back to virtio once scsi is full", func(t *testing.T) {
+		t.Parallel()
+
+		config := fullSCSIConfig()
+		config["virtio0"] = "local-lvm:vm-100-disk-boot"
+
+		lun, ok := freeLun(vmConfigFrom(t, config))
+		assert.True(t, ok)
+		assert.Equal(t, "virtio1", DeviceName(lun))
+	})
+
+	t.Run("every slot taken", func(t *testing.T) {
+		t.Parallel()
+
+		config := fullSCSIConfig()
+		for i := range MaxVirtIODisks {
+			config[fmt.Sprintf("virtio%d", i)] = "local-lvm:vm-100-disk-x"
+		}
+
+		_, ok := freeLun(vmConfigFrom(t, config))
+		assert.False(t, ok)
+	})
+}
+
+func TestDeviceOptions(t *testing.T) {
+	t.Parallel()
+
+	in := map[string]string{"backup": "0", "iothread": "1", "ssd": "1", "wwn": "0xdead"}
+
+	scsi := deviceOptions(5, in)
+	assert.Equal(t, "0x5056432d49443035", scsi["wwn"])
+	assert.Equal(t, "1", scsi["ssd"])
+	assert.NotContains(t, scsi, "serial")
+
+	virtio := deviceOptions(31, in)
+	assert.Equal(t, "PVC-ID31", virtio["serial"])
+	assert.NotContains(t, virtio, "wwn")
+	assert.NotContains(t, virtio, "ssd")
+	assert.Equal(t, "1", virtio["iothread"])
+
+	// The caller's map is left as it was.
+	assert.Equal(t, "0xdead", in["wwn"])
+	assert.NotContains(t, in, "serial")
+}
+
+// TestAttachVolumeVirtIOFallback attaches to a VM whose SCSI slots are all taken
+// and checks the disk lands on the first free virtio slot with a serial, not a
+// WWN, and that the published path is the matching virtio by-id link.
+func TestAttachVolumeVirtIOFallback(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+
+	config := fullSCSIConfig()
+	config["virtio0"] = "local-lvm:vm-100-disk-boot,size=10G"
+
+	var posted map[string]string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api2/json/cluster/resources", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"type":"qemu","vmid":100,"node":"pve-1","name":"worker-1","status":"running"}]}`)
+	})
+	mux.HandleFunc("/api2/json/nodes/pve-1/qemu/100/status/current", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"vmid":100,"status":"running"}}`)
+	})
+	mux.HandleFunc("/api2/json/nodes/pve-1/qemu/100/config", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method == http.MethodPost {
+			posted = map[string]string{}
+
+			body, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			assert.NoError(t, json.Unmarshal(body, &posted))
+			maps.Copy(config, posted)
+
+			fmt.Fprint(w, `{"data":null}`)
+
+			return
+		}
+
+		b, err := json.Marshal(config)
+		assert.NoError(t, err)
+		fmt.Fprintf(w, `{"data":%s}`, b)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cl, err := goproxmox.NewAPIClient(srv.URL + "/api2/json")
+	require.NoError(t, err)
+
+	vol := volume.NewVolume("cluster-1", "pve-1", "local-lvm", "vm-9999-pvc-123")
+
+	pvInfo, err := AttachVolume(context.Background(), cl, 100, vol, map[string]string{"backup": "0", "ssd": "1"})
+	require.NoError(t, err)
+
+	assert.Equal(t, "/dev/disk/by-id/virtio-PVC-ID32", pvInfo["DevicePath"])
+	assert.Equal(t, "32", pvInfo["lun"])
+
+	mu.Lock()
+	attached := posted["virtio1"]
+	mu.Unlock()
+
+	assert.True(t, strings.HasPrefix(attached, "local-lvm:vm-9999-pvc-123,"), attached)
+	assert.Contains(t, attached, "serial=PVC-ID32")
+	assert.NotContains(t, attached, "wwn=")
+	assert.NotContains(t, attached, "ssd=")
+
+	// A second publish finds the disk where it is rather than taking another slot.
+	pvInfo, err = AttachVolume(context.Background(), cl, 100, vol, map[string]string{})
+	require.NoError(t, err)
+	assert.Equal(t, "32", pvInfo["lun"])
 }
