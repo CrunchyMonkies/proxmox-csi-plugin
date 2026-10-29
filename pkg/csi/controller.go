@@ -54,8 +54,6 @@ import (
 )
 
 const (
-	deviceNamePrefix = "scsi"
-
 	// resizeRequired is the key for the volume context parameter to indicate whether resize is required after restore from snapshot
 	resizeRequired = "resizeRequired"
 
@@ -676,7 +674,12 @@ func (d *ControllerService) ControllerPublishVolume(ctx context.Context, request
 
 		mc := metrics.NewMetricContext("expandVolume")
 
-		device := deviceNamePrefix + pvInfo["lun"]
+		lun, err := strconv.Atoi(pvInfo["lun"])
+		if err != nil {
+			return nil, status.Error(codes.Internal, fmt.Sprintf("invalid lun %q: %v", pvInfo["lun"], err))
+		}
+
+		device := toolsproxmox.DeviceName(lun)
 		if err = cl.ResizeVMDisk(ctx, id, vol.Node(), device, fmt.Sprintf("%dM", params.ResizeSizeBytes/MiB)); mc.ObserveRequest(err) != nil {
 			klog.ErrorS(err, "ControllerPublishVolume: failed to resize vm disk", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
 
@@ -1126,7 +1129,7 @@ func (d *ControllerService) ControllerExpandVolume(ctx context.Context, request 
 
 	mc := metrics.NewMetricContext("expandVolume")
 
-	device := deviceNamePrefix + strconv.Itoa(lun)
+	device := toolsproxmox.DeviceName(lun)
 	if err = cl.ResizeVMDisk(ctx, id, vol.Node(), device, fmt.Sprintf("%dM", volSizeBytes/MiB)); mc.ObserveRequest(err) != nil {
 		klog.ErrorS(err, "ControllerExpandVolume: failed to resize vm disk", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
 

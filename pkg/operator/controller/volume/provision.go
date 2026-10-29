@@ -379,8 +379,12 @@ func (r *Reconciler) reconcileExpand(ctx context.Context, vol *v1alpha1.ProxmoxV
 	region := pveVol.Region()
 
 	// Determine the device from the LUN.
-	lun := att.Status.LUN
-	device := "scsi" + lun
+	lun, err := strconv.Atoi(att.Status.LUN)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("attachment %s has invalid lun %q: %w", att.Name, att.Status.LUN, err)
+	}
+
+	device := toolsproxmox.DeviceName(lun)
 
 	sizeStr := fmt.Sprintf("%dM", sizeBytes/csi.MiB)
 

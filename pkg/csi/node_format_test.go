@@ -19,9 +19,12 @@ limitations under the License.
 package csi
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/helpers/ptr"
 )
@@ -76,4 +79,67 @@ func TestCollectFormatOptions(t *testing.T) {
 			assert.Equal(t, testCase.expected, collectFormatOptions(testCase.params, testCase.fsType))
 		})
 	}
+}
+
+func TestFindVirtIODevice(t *testing.T) {
+	t.Parallel()
+
+	sysBlock := t.TempDir()
+
+	for dev, serial := range map[string]string{
+		"vda": "",
+		"vdb": "PVC-ID31\n",
+		"vdc": "PVC-ID32\n",
+		"sda": "PVC-ID33\n",
+	} {
+		require.NoError(t, os.MkdirAll(filepath.Join(sysBlock, dev), 0o755))
+
+		if serial != "" {
+			require.NoError(t, os.WriteFile(filepath.Join(sysBlock, dev, "serial"), []byte(serial), 0o644))
+		}
+	}
+
+	assert.Equal(t, "/dev/vdc", findVirtIODevice(sysBlock, "PVC-ID32"))
+	assert.Equal(t, "/dev/vdb", findVirtIODevice(sysBlock, "PVC-ID31"))
+	// Only virtio-blk disks are considered.
+	assert.Empty(t, findVirtIODevice(sysBlock, "PVC-ID33"))
+	assert.Empty(t, findVirtIODevice(sysBlock, "PVC-ID40"))
+	assert.Empty(t, findVirtIODevice(filepath.Join(sysBlock, "missing"), "PVC-ID31"))
+}
+
+func TestMarkNonRotational(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	sysBlock := filepath.Join(root, "sys")
+	devDir := filepath.Join(root, "dev")
+
+	for _, dev := range []string{"vdb", "sda"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(sysBlock, dev, "queue"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(sysBlock, dev, "queue", "rotational"), []byte("1\n"), 0o644))
+	}
+
+	require.NoError(t, os.MkdirAll(filepath.Join(devDir, "disk", "by-id"), 0o755))
+
+	for _, dev := range []string{"vdb", "sda"} {
+		require.NoError(t, os.WriteFile(filepath.Join(devDir, dev), nil, 0o644))
+	}
+
+	// The by-id link is resolved to the disk it points at.
+	link := filepath.Join(devDir, "disk", "by-id", "virtio-PVC-ID31")
+	require.NoError(t, os.Symlink(filepath.Join(devDir, "vdb"), link))
+
+	require.NoError(t, markNonRotational(sysBlock, link))
+	require.NoError(t, markNonRotational(sysBlock, filepath.Join(devDir, "sda")))
+
+	b, err := os.ReadFile(filepath.Join(sysBlock, "vdb", "queue", "rotational"))
+	require.NoError(t, err)
+	assert.Equal(t, "0", string(b))
+
+	// SCSI disks already carry PVE's rotation rate and are left alone.
+	b, err = os.ReadFile(filepath.Join(sysBlock, "sda", "queue", "rotational"))
+	require.NoError(t, err)
+	assert.Equal(t, "1\n", string(b))
+
+	assert.Error(t, markNonRotational(sysBlock, filepath.Join(devDir, "missing")))
 }

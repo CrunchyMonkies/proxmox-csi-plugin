@@ -36,6 +36,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	toolsproxmox "github.com/sergelogvinov/proxmox-csi-plugin/pkg/tools/proxmox"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/cloud-provider-openstack/pkg/util/blockdevice"
 	"k8s.io/cloud-provider-openstack/pkg/util/mount"
@@ -112,6 +114,12 @@ func (n *NodeService) NodeStageVolume(_ context.Context, request *csi.NodeStageV
 		klog.ErrorS(err, "NodePublishVolume: failed to get device path", "context", request.GetPublishContext())
 
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	if params.SSD != nil && *params.SSD {
+		if err := markNonRotational("/sys/block", devicePath); err != nil {
+			klog.InfoS("NodeStageVolume: failed to mark device non-rotational, ignored", "device", devicePath, "err", err)
+		}
 	}
 
 	if blk := volumeCapability.GetBlock(); blk != nil {
@@ -713,9 +721,15 @@ func getDevicePath(deviceContext map[string]string) (string, error) {
 		return "", fmt.Errorf("DevicePath must be provided")
 	}
 
+	if serial, ok := strings.CutPrefix(devicePath, toolsproxmox.DevicePathVirtIOPrefix); ok && serial != "" {
+		if dev := findVirtIODevice("/sys/block", serial); dev != "" {
+			return dev, nil
+		}
+	}
+
 	deviceWWN := ""
-	if strings.HasPrefix(devicePath, "/dev/disk/by-id/wwn-0x") {
-		deviceWWN = devicePath[len("/dev/disk/by-id/wwn-0x"):]
+	if strings.HasPrefix(devicePath, toolsproxmox.DevicePathWWNPrefix) {
+		deviceWWN = devicePath[len(toolsproxmox.DevicePathWWNPrefix):]
 	}
 
 	if deviceWWN != "" {
@@ -790,4 +804,49 @@ func getDevicePath(deviceContext map[string]string) (string, error) {
 	}
 
 	return devicePath, nil
+}
+
+// findVirtIODevice returns the virtio-blk disk whose serial is serial, read from
+// sysfs so it does not depend on udev having created the by-id link yet.
+func findVirtIODevice(sysBlock, serial string) string {
+	dirs, err := os.ReadDir(sysBlock)
+	if err != nil {
+		return ""
+	}
+
+	for _, f := range dirs {
+		if !strings.HasPrefix(f.Name(), "vd") {
+			continue
+		}
+
+		b, err := os.ReadFile(filepath.Join(sysBlock, f.Name(), "serial"))
+		if err != nil {
+			continue
+		}
+
+		if strings.TrimSpace(string(b)) == serial {
+			return "/dev/" + f.Name()
+		}
+	}
+
+	return ""
+}
+
+// markNonRotational clears the rotational flag of a virtio-blk disk. PVE's ssd
+// option is SCSI-only (it sets the SCSI rotation rate) and Linux reports every
+// virtio-blk disk as rotational, so an ssd volume on a virtio slot would otherwise
+// look like a spinning disk to the guest's I/O scheduler and filesystems. SCSI
+// disks are left alone: PVE already reports them correctly.
+func markNonRotational(sysBlock, devicePath string) error {
+	dev, err := filepath.EvalSymlinks(devicePath)
+	if err != nil {
+		return err
+	}
+
+	name := filepath.Base(dev)
+	if !strings.HasPrefix(name, "vd") {
+		return nil
+	}
+
+	return os.WriteFile(filepath.Join(sysBlock, name, "queue", "rotational"), []byte("0"), 0o644) //nolint:gofumpt
 }

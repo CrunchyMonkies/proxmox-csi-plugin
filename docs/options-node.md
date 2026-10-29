@@ -27,7 +27,10 @@ metadata:
     topology.kubernetes.io/zone: pve-node-1
 
     # Maximum number of volumes that can be attached to this node, default is 24 (optional)
-    # Note: Currently, there is a maximum limit of 30 virtio iscsi volumes *total*, including root disks, that can be attached to a single VM in QEMU/Proxmox.
+    # Note: Linux nodes accept up to 46: PVE allows 31 SCSI slots (scsi0-scsi30) and 16 virtio-blk
+    # slots (virtio0-virtio15) per VM, and the boot disk and any other disks on the VM take some of them.
+    # Volumes go on SCSI first and use virtio-blk only once every SCSI slot is taken, see docs/volume-limits.md.
+    # Windows nodes stay limited to 30 (SCSI only).
     csi.proxmox.sinextra.dev/max-volume-attachments: "24"
 ...
 spec:
