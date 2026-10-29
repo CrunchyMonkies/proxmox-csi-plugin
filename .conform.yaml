@@ -48,6 +48,7 @@ policies:
         - node.go
         - node_test.go
         - node_format_test.go
+        - node_luks_test.go
         - _windows.go
       allowPrecedingComments: false
       header: |

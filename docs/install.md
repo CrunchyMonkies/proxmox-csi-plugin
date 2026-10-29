@@ -171,6 +171,10 @@ Or install latest stable version (edge)
 kubectl apply -f https://raw.githubusercontent.com/CrunchyMonkies/proxmox-csi-plugin/main/docs/deploy/proxmox-csi-plugin.yml
 ```
 
+These manifests run csi-provisioner v6 and csi-resizer v2, which need Kubernetes 1.34 or newer
+(they watch the GA `storage.k8s.io/v1` VolumeAttributesClass API). On older clusters install with
+Helm, which picks provisioner v5.3.0 and resizer v1.14.0 there.
+
 ### Install the plugin by using Helm
 
 Create the helm values file, for more information see [values.yaml](../charts/proxmox-csi-plugin/values.yaml)

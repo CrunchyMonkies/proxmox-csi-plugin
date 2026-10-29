@@ -125,6 +125,8 @@ metadata:
   namespace: kube-system
 ```
 
+* `encryptionAllowDiscards` - `true` lets discards pass through the LUKS (dm-crypt) layer of an encrypted volume, so the `discard` mount option and `fstrim` release freed blocks on thin storage. Without it dm-crypt drops every discard and the disk only grows. Off by default, because discards reveal which ciphertext blocks are unused. On LUKS2 headers (every volume the driver formats) the flag is also stored in the header, so a volume formatted before the parameter was set picks it up the next time it is staged. Removing the parameter later does not clear a stored flag; run `cryptsetup refresh <name> --persistent --key-file=-` without `--allow-discards` on the node to do that.
+
 * `blockSize` - specify the size of blocks in bytes.
 * `inodeSize` - Specify the size of each inode in bytes.
 

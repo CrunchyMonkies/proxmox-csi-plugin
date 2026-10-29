@@ -19,6 +19,7 @@ limitations under the License.
 package csi
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -198,6 +199,14 @@ func (n *NodeService) NodeStageVolume(_ context.Context, request *csi.NodeStageV
 			}
 
 			devicePath = lukskDevicePath
+
+			if params.EncryptionAllowDiscards != nil && *params.EncryptionAllowDiscards {
+				if err := luksAllowDiscards(exec.New(), filepath.Base(lukskDevicePath), []byte(passphraseKey)); err != nil {
+					klog.ErrorS(err, "NodeStageVolume: failed to allow discards on encrypted device", "device", lukskDevicePath)
+
+					return nil, status.Error(codes.Internal, err.Error())
+				}
+			}
 		}
 
 		klog.V(5).InfoS("NodeStageVolume: mount device with options", "device", devicePath, "fsType", fsType, "options", options, "formatOptions", formatOptions)
@@ -790,4 +799,36 @@ func getDevicePath(deviceContext map[string]string) (string, error) {
 	}
 
 	return devicePath, nil
+}
+
+// luksAllowDiscards reloads an open LUKS mapping with discards passed through to the
+// device. On LUKS2 the flag is also stored in the header (--persistent), so later opens
+// keep it and volumes formatted before the StorageClass asked for it are migrated on
+// their next stage. LUKS1 has no persistent flags, so only the live mapping changes.
+func luksAllowDiscards(e exec.Interface, mappedName string, key []byte) error {
+	var (
+		args []string
+		out  []byte
+	)
+
+	for _, persistent := range []bool{true, false} {
+		args = []string{"refresh", mappedName, "--allow-discards"}
+		if persistent {
+			args = append(args, "--persistent")
+		}
+
+		args = append(args, "--key-file=-")
+
+		cmd := e.Command("cryptsetup", args...)
+		cmd.SetStdin(bytes.NewReader(key))
+
+		var err error
+		if out, err = cmd.CombinedOutput(); err == nil {
+			klog.V(5).InfoS("luksAllowDiscards: discards allowed", "name", mappedName, "args", args)
+
+			return nil
+		}
+	}
+
+	return fmt.Errorf("cryptsetup %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
 }

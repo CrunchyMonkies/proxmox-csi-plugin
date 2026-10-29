@@ -50,8 +50,13 @@ rules:
     resources: ["volumeattachments/status"]
     verbs: ["patch"]
 
+  # csi-provisioner v6 runs a snapshot finalizer controller that watches and
+  # updates VolumeSnapshots used as a claim's data source.
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
     verbs: ["get", "list"]
 
 {{- if .Values.controller.snapshotter.enabled }}

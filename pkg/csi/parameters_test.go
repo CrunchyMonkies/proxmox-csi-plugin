@@ -412,6 +412,14 @@ func TestVolumeContextMatchesCreateVolume(t *testing.T) {
 				"rootDirPermissions": "0777",
 			},
 		},
+		{
+			name:       "encrypted StorageClass with discards allowed",
+			parameters: map[string]string{"storage": "local-lvm", "encryptionAllowDiscards": "true"},
+			expected: map[string]string{
+				"backup": "0", "iothread": "1", "storage": "local-lvm", "replicate": "0",
+				"encryptionAllowDiscards": "1",
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
