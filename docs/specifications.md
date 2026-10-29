@@ -81,9 +81,9 @@ The controller pod bundles the standard CSI sidecars (versions from `charts/prox
 
 | Sidecar | Version | Purpose |
 |---|---|---|
-| csi-provisioner | v5.3.0 | Watches PVCs, calls `CreateVolume`/`DeleteVolume` |
+| csi-provisioner | v6.4.0 (v5.3.0 on Kubernetes < 1.34) | Watches PVCs, calls `CreateVolume`/`DeleteVolume` |
 | csi-attacher | v4.10.0 | Watches VolumeAttachments, calls `ControllerPublishVolume` |
-| csi-resizer | v1.14.0 | Watches PVC size changes, calls `ControllerExpandVolume` |
+| csi-resizer | v2.3.0 (v1.14.0 on Kubernetes < 1.34) | Watches PVC size changes, calls `ControllerExpandVolume` |
 | csi-snapshotter | v8.3.0 | Optional, disabled by default; snapshot lifecycle |
 | livenessprobe | v2.16.0 | gRPC health checks |
 

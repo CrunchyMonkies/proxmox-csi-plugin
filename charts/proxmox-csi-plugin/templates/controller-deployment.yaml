@@ -122,7 +122,7 @@ spec:
         - name: csi-provisioner
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.controller.provisioner.image.repository }}:{{ .Values.controller.provisioner.image.tag }}"
+          image: "{{ .Values.controller.provisioner.image.repository }}:{{ include "proxmox-csi-plugin.provisionerTag" . }}"
           imagePullPolicy: {{ .Values.controller.provisioner.image.pullPolicy }}
           args:
             - "-v={{ .Values.logVerbosityLevel }}"
@@ -155,7 +155,7 @@ spec:
         - name: csi-resizer
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.controller.resizer.image.repository }}:{{ .Values.controller.resizer.image.tag }}"
+          image: "{{ .Values.controller.resizer.image.repository }}:{{ include "proxmox-csi-plugin.resizerTag" . }}"
           imagePullPolicy: {{ .Values.controller.resizer.image.pullPolicy }}
           args:
             - "-v={{ .Values.logVerbosityLevel }}"

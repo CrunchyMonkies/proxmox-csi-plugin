@@ -55,6 +55,11 @@ const (
 	// does not recursively chown/chmod the volume). Only the root directory is touched,
 	// so application-managed data subdirectories (e.g. Postgres PGDATA) keep their perms.
 	RootDirPermissionsKey = "rootDirPermissions"
+
+	// EncryptionAllowDiscardsKey lets discards pass through the dm-crypt mapping of an
+	// encrypted volume, so `discard` mounts and fstrim release space on thin storage.
+	// Off by default: discards reveal which ciphertext blocks are free.
+	EncryptionAllowDiscardsKey = "encryptionAllowDiscards"
 )
 
 // StorageParameters contains storage parameters
@@ -82,6 +87,8 @@ type StorageParameters struct {
 	InodeSize      *int   `json:"inodeSize"`
 
 	RootDirPermissions string `json:"rootDirPermissions,omitempty"`
+
+	EncryptionAllowDiscards *bool `json:"encryptionAllowDiscards,omitempty"`
 
 	// KataDirectVolume set to false keeps volumes of Kata pods on virtio-fs instead of mounting
 	// the disk inside the VM (see NodeService.SetKataDirectVolumes).

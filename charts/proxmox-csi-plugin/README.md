@@ -1,6 +1,6 @@
 # proxmox-csi-plugin
 
-![Version: 0.26.0](https://img.shields.io/badge/Version-0.26.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.9.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.9.0-informational?style=flat-square)
+![Version: 0.27.0](https://img.shields.io/badge/Version-0.27.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.20.0-1.10.0](https://img.shields.io/badge/AppVersion-v0.20.0--1.10.0-informational?style=flat-square)
 
 Container Storage Interface plugin for Proxmox
 
@@ -133,11 +133,11 @@ helm upgrade -i --namespace=csi-proxmox -f proxmox-csi.yaml \
 | controller.attacher.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-attacher","tag":"v4.10.0"}` | CSI Attacher. ref: https://github.com/kubernetes-csi/external-attacher |
 | controller.attacher.args | list | `["--default-fstype=ext4"]` | Attacher arguments. example: --default-fstype=ext4 |
 | controller.attacher.resources | object | `{"requests":{"cpu":"10m","memory":"16Mi"}}` | Attacher resource requests and limits. ref: https://kubernetes.io/docs/user-guide/compute-resources/ |
-| controller.provisioner.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-provisioner","tag":"v5.3.0"}` | CSI Provisioner. ref: https://github.com/kubernetes-csi/external-provisioner |
-| controller.provisioner.args | list | `["--default-fstype=ext4"]` | Provisioner arguments. example: --feature-gates=VolumeAttributesClass=true |
+| controller.provisioner.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-provisioner","tag":""}` | CSI Provisioner. ref: https://github.com/kubernetes-csi/external-provisioner |
+| controller.provisioner.args | list | `["--default-fstype=ext4"]` | Provisioner arguments. example: --feature-gates=VolumeAttributesClass=true (v5.x on Kubernetes < 1.34 only) |
 | controller.provisioner.resources | object | `{"requests":{"cpu":"10m","memory":"16Mi"}}` | Provisioner resource requests and limits. ref: https://kubernetes.io/docs/user-guide/compute-resources/ |
-| controller.resizer.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-resizer","tag":"v1.14.0"}` | CSI Resizer. refs: https://github.com/kubernetes-csi/external-resizer |
-| controller.resizer.args | list | `[]` | Resizer arguments. example: --feature-gates=VolumeAttributesClass=true |
+| controller.resizer.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-resizer","tag":""}` | CSI Resizer. refs: https://github.com/kubernetes-csi/external-resizer |
+| controller.resizer.args | list | `[]` | Resizer arguments. example: --feature-gates=VolumeAttributesClass=true (v1.x on Kubernetes < 1.34 only) |
 | controller.resizer.resources | object | `{"requests":{"cpu":"10m","memory":"16Mi"}}` | Resizer resource requests and limits. ref: https://kubernetes.io/docs/user-guide/compute-resources/ |
 | controller.snapshotter.enabled | bool | `false` |  |
 | controller.snapshotter.image | object | `{"pullPolicy":"IfNotPresent","repository":"registry.k8s.io/sig-storage/csi-snapshotter","tag":"v8.3.0"}` | CSI Snapshotter. refs: https://github.com/kubernetes-csi/external-snapshotter |

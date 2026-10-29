@@ -141,3 +141,26 @@ Namespace in the management cluster holding one tenant's volume objects.
 {{- define "proxmox-csi-plugin-operator.tenantNamespace" -}}
 {{- default (printf "tenant-%s" .name) .namespace }}
 {{- end }}
+
+{{/*
+Sidecar tags that follow the cluster version. Kubernetes 1.34 made
+VolumeAttributesClass GA and later releases stop serving v1beta1, which the
+provisioner v5.x and resizer v1.x informers watch; v6.x and v2.x watch v1 instead.
+*/}}
+{{- define "proxmox-csi-plugin.vacGA" -}}
+{{- if semverCompare ">=1.34-0" .Capabilities.KubeVersion.Version }}true{{ end }}
+{{- end }}
+
+{{- define "proxmox-csi-plugin.provisionerTag" -}}
+{{- if .Values.controller.provisioner.image.tag }}{{ .Values.controller.provisioner.image.tag }}
+{{- else if include "proxmox-csi-plugin.vacGA" . }}v6.4.0
+{{- else }}v5.3.0
+{{- end }}
+{{- end }}
+
+{{- define "proxmox-csi-plugin.resizerTag" -}}
+{{- if .Values.controller.resizer.image.tag }}{{ .Values.controller.resizer.image.tag }}
+{{- else if include "proxmox-csi-plugin.vacGA" . }}v2.3.0
+{{- else }}v1.14.0
+{{- end }}
+{{- end }}
